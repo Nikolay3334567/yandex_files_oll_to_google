@@ -18,10 +18,23 @@ from .db import DB
 from .gdrive import APP_PROP, DriveClient, GoogleAuth
 from .http_util import ApiError, AuthError, FatalPause, NETWORK_ERRORS, RateLimited, backoff
 from .yandex import YandexClient
+from . import local
 
 
 class Paused(Exception):
     pass
+
+
+def _with_date(base, row, split, fallback_dates=True):
+    """base/<год>[/<год-месяц>] по дате съёмки (EXIF → имя файла → дата создания/изменения)."""
+    date = (row.get("taken") or local.date_from_name(row.get("name") or "") or
+            (row.get("created") or row.get("modified") if fallback_dates else None) or "").replace(":", "-")[:10]
+    if len(date) == 10 and date[4] == "-":
+        if split == "year":
+            return f"{base}/{date[:4]}", True
+        if split == "month":
+            return f"{base}/{date[:4]}/{date[:7]}", True
+    return base, False
 
 
 def drive_dir_for(row, s):
@@ -30,15 +43,23 @@ def drive_dir_for(row, s):
     if row["source"] == "photounlim":
         rel = path.split(":", 1)[1].lstrip("/")
         sub = rel.rsplit("/", 1)[0] if "/" in rel else ""
-        base = s["photounlim_folder"] or "Фото (безлимит)"
-        date = (row.get("taken") or row.get("created") or row.get("modified") or "")[:10]
-        split = s["photounlim_split"]
-        if len(date) == 10 and date[4] == "-":
-            if split == "year":
-                base += "/" + date[:4]
-            elif split == "month":
-                base += f"/{date[:4]}/{date[:7]}"
+        base, _ = _with_date(s["photounlim_folder"] or "Фото (безлимит)", row, s["photounlim_split"])
         return f"{base}/{sub}" if sub else base
+    if row["source"] == "local":
+        full = path[len(local.PREFIX):]
+        base = s["local_folder"] or "Фото (безлимит)"
+        if s["local_split"] in ("year", "month"):
+            # у копий на компьютере дата изменения = дата скачивания, поэтому её не используем
+            dated, ok = _with_date(base, row, s["local_split"], fallback_dates=False)
+            return dated if ok else f"{base}/Без даты"
+        root = local.root_for(full, local.parse_dirs(s["local_dirs"]))
+        parent = os.path.dirname(full)
+        if root:
+            rel = os.path.relpath(parent, root)
+            parts = [os.path.basename(os.path.normpath(root))] + ([] if rel == "." else rel.split(os.sep))
+        else:
+            parts = [os.path.basename(parent)]
+        return "/".join([base] + [p for p in parts if p])
     rel = path.split(":", 1)[1].lstrip("/") if ":" in path else path.lstrip("/")
     return rel.rsplit("/", 1)[0] if "/" in rel else ""
 
@@ -114,11 +135,18 @@ class Engine:
             res["files_api"] = "работает"
         except ApiError as e:
             res["files_api"] = f"ошибка: {e}"
-        try:
-            files, dirs, total, _ = y.dir_page("photounlim:/", 0, 1)
-            res["photounlim"] = f"доступен, элементов: {total}"
-        except ApiError as e:
-            res["photounlim"] = f"недоступен ({e})"
+        method, report = y.probe_photounlim()
+        res["photounlim_method"] = method
+        res["photounlim_report"] = report
+        size = int(info.get("photounlim_size") or 0)
+        if method:
+            res["photounlim"] = "фото из раздела «Фото» доступны через API — будут перенесены напрямую"
+        elif size:
+            res["photounlim"] = ("в разделе «Фото» (безлимитная автозагрузка) лежат файлы, но Яндекс НЕ отдаёт "
+                                 "их через API. Используйте блок «Папки на компьютере» — инструкция там.")
+        else:
+            res["photounlim"] = "безлимитных фото не обнаружено"
+        self.db.set("photounlim.method", method or "")
         self.log(f"Проверка Яндекса: {res}")
         return res
 
@@ -138,14 +166,18 @@ class Engine:
         return res
 
     # ================================================================== сканирование
-    def start_scan(self, fresh=False):
+    def start_scan(self, fresh=False, only_local=False):
         with self.lock:
             if self.scan_thread and self.scan_thread.is_alive():
                 return False
-            if not self.settings["yandex_token"]:
-                raise AuthError("Сначала укажите токен Яндекса")
+            has_local = bool(local.parse_dirs(self.settings["local_dirs"]))
+            if only_local and not has_local:
+                raise ApiError("Не указаны папки на компьютере")
+            if not only_local and not self.settings["yandex_token"] and not has_local:
+                raise AuthError("Сначала укажите токен Яндекса (или папки на компьютере)")
             self.stop_scan.clear()
-            self.scan_thread = threading.Thread(target=self._scan, args=(fresh,), daemon=True, name="scan")
+            target = self._scan_local_only if only_local else self._scan
+            self.scan_thread = threading.Thread(target=target, args=(fresh,), daemon=True, name="scan")
             self.scan_thread.start()
             return True
 
@@ -166,7 +198,10 @@ class Engine:
         db.set("scan.state", "running")
         db.set("scan.error", "")
         y = YandexClient(s["yandex_token"], stop_event=self.stop_scan, log=self.log)
+        has_ya = bool(s["yandex_token"])
         try:
+            if db.get("scan.phase") == "main" and not has_ya:
+                db.set("scan.phase", "local")
             if db.get("scan.phase") == "main":
                 if s["scan_mode"] == "tree":
                     self._scan_tree(y, "disk:/", scan_id)
@@ -176,13 +211,11 @@ class Engine:
                 db.set("scan.offset", 0)
             if db.get("scan.phase") == "photounlim":
                 if s["include_photounlim"]:
-                    try:
-                        self._scan_tree(y, "photounlim:/", scan_id)
-                    except AuthError:
-                        raise
-                    except ApiError as e:
-                        self.log(f"Раздел безлимитных фото (photounlim) не прочитан: {e}. "
-                                 f"Если фото есть только там — см. README, раздел «Фото».", "warn")
+                    self._scan_photounlim(y, scan_id)
+                db.set("scan.phase", "local")
+                db.set("scan.offset", 0)
+            if db.get("scan.phase") == "local":
+                self._scan_local(scan_id)
                 db.set("scan.phase", "done")
             if self.stop_scan.is_set():
                 raise Paused()
@@ -198,6 +231,81 @@ class Engine:
             db.set("scan.error", str(e))
             self.log(f"Сканирование прервано ошибкой: {e}", "error")
             self.log(traceback.format_exc(), "debug")
+
+    def _scan_photounlim(self, y, scan_id):
+        """Раздел «Фото» (безлимитная автозагрузка). Официального метода нет — пробуем известные."""
+        method, report = y.probe_photounlim()
+        self.db.set("photounlim.method", method or "")
+        if method == "tree":
+            self._scan_tree(y, "photounlim:/", scan_id)
+            return
+        if method == "flat":
+            limit, offset = 1000, int(self.db.get("scan.offset", "0"))
+            while not self.stop_scan.is_set():
+                files, raw = y.photounlim_flat_page(offset, limit)
+                if files:
+                    self.db.upsert_files(files, scan_id)
+                    self._bump_found(len(files))
+                offset += raw
+                self.db.set("scan.offset", offset)
+                if raw < limit:
+                    return
+                self.log(f"Сканирование раздела «Фото»: получено {offset} записей…")
+            return
+        try:
+            size = int(y.disk_info().get("photounlim_size") or 0)
+        except ApiError:
+            size = 0
+        if size:
+            self.log(f"В разделе «Фото» (безлимитная автозагрузка) лежит {size / 2**30:.1f} ГБ, но Яндекс НЕ "
+                     f"отдаёт эти файлы через публичный API ({'; '.join(report)}). Перенесите их через блок "
+                     f"«Папки на компьютере»: программа «Яндекс Диск» для Windows умеет копировать их на ПК.",
+                     "warn")
+        else:
+            self.log("Безлимитных фото через API не найдено (" + "; ".join(report) + ")")
+
+    def _scan_local(self, scan_id):
+        dirs = local.parse_dirs(self.settings["local_dirs"])
+        if not dirs:
+            return
+        total, young = 0, 0
+        for d in dirs:
+            if not os.path.isdir(d):
+                self.log(f"Папка не найдена: {d}", "warn")
+                continue
+            for batch, y_cnt in local.scan_dir(d, self.settings["local_min_age_sec"], self.stop_scan):
+                if batch:
+                    self.db.upsert_files(batch, scan_id)
+                    self._bump_found(len(batch))
+                    total += len(batch)
+                young = y_cnt
+            self.log(f"Папка «{d}»: найдено файлов {total}")
+        if young:
+            self.log(f"Пропущено {young} файлов, которые менялись меньше "
+                     f"{self.settings['local_min_age_sec']} с назад (ещё скачиваются) — возьму при следующем проходе")
+
+    def check_local_dirs(self):
+        out = []
+        for d in local.parse_dirs(self.settings["local_dirs"]):
+            if not os.path.isdir(d):
+                out.append({"dir": d, "ok": False, "msg": "папка не найдена"})
+                continue
+            n = size = 0
+            for dirpath, _, files in os.walk(d):
+                for fn in files:
+                    try:
+                        size += os.path.getsize(os.path.join(dirpath, fn))
+                        n += 1
+                    except OSError:
+                        pass
+            out.append({"dir": d, "ok": True, "files": n, "bytes": size})
+        return {"dirs": out}
+
+    def _scan_local_only(self, fresh=False):
+        try:
+            self._scan_local(int(self.db.get("scan.id", "1")))
+        except Exception as e:  # noqa
+            self.log(f"Сканирование папок на компьютере: ошибка {e}", "error")
 
     def _bump_found(self, n):
         found = int(self.db.get("scan.found", "0")) + n
@@ -260,6 +368,8 @@ class Engine:
             for t in self.workers:
                 t.start()
             threading.Thread(target=self._supervise, daemon=True).start()
+            if self._watching_local():
+                threading.Thread(target=self._local_watcher, daemon=True).start()
             self.log(f"Перенос запущен, потоков: {n}")
             return True
 
@@ -288,6 +398,18 @@ class Engine:
                 self.log(f"Перенос завершён. Готово: {st.get('done', {}).get('count', 0)}, "
                          f"ошибок: {st.get('error', {}).get('count', 0)}")
 
+    def _watching_local(self):
+        return bool(self.settings["local_watch"] and local.parse_dirs(self.settings["local_dirs"]))
+
+    def _local_watcher(self):
+        """Пока идёт перенос — периодически пересканирует папки (туда докачивает программа Яндекса)."""
+        while not self.stop_transfer.wait(max(1, self.settings["local_rescan_min"]) * 60):
+            if self._watching_local() and not self.scanning():
+                try:
+                    self.start_scan(only_local=True)
+                except Exception as e:  # noqa
+                    self.log(f"Пересканирование папок: {e}", "warn")
+
     def scanning(self):
         return bool(self.scan_thread and self.scan_thread.is_alive())
 
@@ -300,7 +422,7 @@ class Engine:
                 continue
             row = self.db.claim_next()
             if row is None:
-                if self.scanning() or self.db.has_waiting_retries():
+                if self.scanning() or self.db.has_waiting_retries() or self._watching_local():
                     stop.wait(3)
                     continue
                 return
@@ -377,11 +499,15 @@ class Engine:
             if s["skip_existing"]:
                 info["stage"] = "проверка наличия на Drive"
                 for f in drive.find_in_parent(parent, row["name"]):
-                    same = (row["md5"] and f.get("md5Checksum") == row["md5"]) or \
-                           (not row["md5"] and int(f.get("size") or -1) == size)
-                    if same:
+                    if int(f.get("size") or -1) != size:
+                        continue
+                    if row["source"] == "local" and not row["md5"]:
+                        row["md5"] = local.file_md5(row["path"])
+                        self.db.update_file(row["id"], md5=row["md5"])
+                    if not row["md5"] or f.get("md5Checksum") == row["md5"]:
                         self.db.update_file(row["id"], status="done", gd_id=f["id"], bytes_done=size,
                                             last_error=None, note="уже был на Drive")
+                        self._maybe_delete_local(row)
                         return
             if size == 0:
                 f = drive.create_empty(row["name"], parent, row["mime"], props, row["modified"])
@@ -420,7 +546,10 @@ class Engine:
                             stream = None
                     if stream is None:
                         info["stage"] = "открываю Яндекс"
-                        stream, pos = y.open_stream(row["path"], offset)
+                        if row["source"] == "local":
+                            stream, pos = local.open_stream(row["path"], offset)
+                        else:
+                            stream, pos = y.open_stream(row["path"], offset)
                         if pos < offset:
                             skipped = read_exact(stream.raw, offset - pos)
                             if len(skipped) != offset - pos:
@@ -474,9 +603,21 @@ class Engine:
             if stream is not None:
                 stream.close()
 
+    def _maybe_delete_local(self, row):
+        if row["source"] != "local" or not self.settings["local_delete_after"] or not row["md5"]:
+            return
+        try:
+            os.remove(row["path"][len(local.PREFIX):])
+            self.db.update_file(row["id"], note="загружен и сверен, копия на компьютере удалена")
+        except OSError as e:
+            self.log(f"Не удалось удалить локальную копию {row['path']}: {e}", "warn")
+
     def _finish(self, row, f, drive):
         s = self.settings
         gmd5 = f.get("md5Checksum")
+        if row["source"] == "local":
+            row["md5"] = local.file_md5(row["path"])   # MD5 считаем по локальному файлу
+            self.db.update_file(row["id"], md5=row["md5"])
         if s["verify_md5"] and row["md5"] and gmd5 and gmd5 != row["md5"]:
             drive.delete(f["id"])
             self.db.update_file(row["id"], upload_uri=None, bytes_done=0)
@@ -488,6 +629,8 @@ class Engine:
             raise ApiError("Размер на Drive не совпал — файл будет загружен заново", retryable=True)
         self.db.update_file(row["id"], status="done", gd_id=f["id"], upload_uri=None,
                             bytes_done=row["size"], last_error=None, note=None)
+        if gmd5 and row["md5"] == gmd5:
+            self._maybe_delete_local(row)
 
     # ================================================================== служебные операции
     def busy(self):
@@ -584,4 +727,6 @@ class Engine:
                            "google": bool(self.settings["google_refresh_token"]),
                            "google_client": bool(self.settings["google_client_id"])},
             "google_email": self.settings["google_email"],
+            "photounlim_method": db.get("photounlim.method"),
+            "watching_local": self._watching_local(),
         }

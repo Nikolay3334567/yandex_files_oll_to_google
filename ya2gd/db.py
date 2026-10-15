@@ -98,15 +98,15 @@ class DB:
                             ON CONFLICT(path) DO UPDATE SET
                               status = CASE WHEN files.status IN ('done','skipped')
                                               AND (files.size != excluded.size
-                                                   OR IFNULL(files.md5,'') != IFNULL(excluded.md5,''))
+                                                   OR (excluded.md5 IS NOT NULL AND IFNULL(files.md5,'') != excluded.md5))
                                             THEN 'pending' ELSE files.status END,
                               gd_id = CASE WHEN files.size != excluded.size
-                                              OR IFNULL(files.md5,'') != IFNULL(excluded.md5,'')
+                                              OR (excluded.md5 IS NOT NULL AND IFNULL(files.md5,'') != excluded.md5)
                                            THEN NULL ELSE files.gd_id END,
                               upload_uri = CASE WHEN files.size != excluded.size
-                                              OR IFNULL(files.md5,'') != IFNULL(excluded.md5,'')
+                                              OR (excluded.md5 IS NOT NULL AND IFNULL(files.md5,'') != excluded.md5)
                                            THEN NULL ELSE files.upload_uri END,
-                              size=excluded.size, md5=excluded.md5, sha256=excluded.sha256,
+                              size=excluded.size, md5=COALESCE(excluded.md5, files.md5), sha256=excluded.sha256,
                               modified=excluded.modified, created=excluded.created,
                               taken=excluded.taken, mime=excluded.mime,
                               media_type=excluded.media_type, name=excluded.name,

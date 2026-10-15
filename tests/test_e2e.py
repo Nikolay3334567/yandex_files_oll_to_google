@@ -164,6 +164,7 @@ def main():
         notes = app.get("/api/files?status=done&limit=500")["items"]
         assert all(n["note"] == "уже был на Drive" for n in notes), notes[:3]
         print("OK повторный полный прогон: дублей нет, всё распознано как уже загруженное")
+        local_folder_test(app, M, ddir)
         print("\nВСЕ ПРОВЕРКИ ПРОЙДЕНЫ")
     except Exception:
         print("---- журнал программы ----")
@@ -176,6 +177,57 @@ def main():
             pass
         mock.terminate()
         shutil.rmtree(ddir, ignore_errors=True)
+
+
+def local_folder_test(app, M, ddir):
+    """Раздел «Фото» не отдаётся API → берём файлы из папки, куда их скачала программа Яндекса."""
+    http("POST", M + "/ctl/faults", {"pu_hidden": True, "ya_drop": 0, "g_500": 0.1})
+    code, r = app.post("/api/yandex/test")
+    assert code == 200 and r["photounlim_method"] is None and "НЕ отдаёт" in r["photounlim"], r
+    print("OK раздел «Фото» скрыт от API — программа честно об этом говорит:", r["photounlim"][:70])
+
+    src = os.path.join(ddir, "Яндекс копии", "Фотокамера")
+    os.makedirs(os.path.join(src, "sub"))
+    files = {"2020-07-15 12-00-00.JPG": os.urandom(300_000), "sub/2021-01-02 08-30-00.MP4": os.urandom(2_500_000),
+             "IMG_без_даты.jpg": os.urandom(1000), "качается.jpg.tmp": b"x"}
+    old = time.time() - 3600
+    for rel, data in files.items():
+        fp = os.path.join(src, rel)
+        with open(fp, "wb") as f:
+            f.write(data)
+        os.utime(fp, (old, old))
+    young = os.path.join(src, "2022-02-02 02-02-02.jpg")   # ещё «скачивается»
+    with open(young, "wb") as f:
+        f.write(b"young")
+    app.post("/api/settings", {"local_dirs": os.path.dirname(src) + "\n", "local_delete_after": True,
+                               "local_watch": False})
+    code, r = app.post("/api/local/check")
+    assert r["dirs"][0]["ok"] and r["dirs"][0]["files"] == 5, r
+    app.post("/api/scan/local")
+    wait_for(lambda: not app.get("/api/status")["scan"]["running"], 30, "local scan")
+    app.post("/api/transfer/start")
+    wait_for(lambda: app.get("/api/status")["transfer"]["state"] == "done", 120, "local transfer")
+    drive = http("GET", M + "/ctl/drive")[1]
+
+    def full(fid):
+        parts = []
+        while fid in drive:
+            parts.append(drive[fid]["name"])
+            fid = drive[fid]["parents"][0]
+        return "/".join(reversed(parts))
+    import hashlib
+    got = {full(fid): f["md5"] for fid, f in drive.items() if not f["folder"] and not f["trashed"]}
+    base = "Yandex Disk/Фото (безлимит)/"
+    exp = {base + "2020/2020-07/2020-07-15 12-00-00.JPG": hashlib.md5(files["2020-07-15 12-00-00.JPG"]).hexdigest(),
+           base + "2021/2021-01/2021-01-02 08-30-00.MP4": hashlib.md5(files["sub/2021-01-02 08-30-00.MP4"]).hexdigest(),
+           base + "Без даты/IMG_без_даты.jpg": hashlib.md5(files["IMG_без_даты.jpg"]).hexdigest()}
+    for k, v in exp.items():
+        assert got.get(k) == v, (k, sorted(x for x in got if "безлимит" in x))
+    assert not any("tmp" in k or "2022-02-02" in k for k in got)
+    left = sorted(os.path.relpath(os.path.join(d, f), src) for d, _, fs in os.walk(src) for f in fs)
+    assert left == ["2022-02-02 02-02-02.jpg", "качается.jpg.tmp"], left
+    print("OK папка на компьютере: файлы разложены по году/месяцу, MD5 совпал, локальные копии удалены; "
+          "недокачанные и .tmp не тронуты")
 
 
 def check(app, M):
@@ -203,7 +255,8 @@ def check(app, M):
         if path.startswith("disk:/"):
             expected["Yandex Disk/" + path[6:]] = h
         else:
-            expected["Yandex Disk/Фото (безлимит)/2019/2019-05/" + path.split("/")[-1]] = h
+            name = path.split("/")[-1]     # дата берётся из имени файла: «2019-05-04 10-00-00.JPG»
+            expected[f"Yandex Disk/Фото (безлимит)/{name[:4]}/{name[:7]}/{name}"] = h
     assert live == expected, (sorted(set(live) ^ set(expected)),
                               [k for k in live if k in expected and live[k] != expected[k]])
     st = app.get("/api/status")["stats"]["by_status"]

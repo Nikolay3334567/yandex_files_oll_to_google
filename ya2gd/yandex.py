@@ -44,7 +44,7 @@ class YandexClient:
     def _headers(self):
         return {"Authorization": f"OAuth {self.token}", "Accept": "application/json"}
 
-    def _get(self, url, params=None, tries=8):
+    def _get(self, url, params=None, tries=8, forbidden_is_auth=True):
         if not self.token:
             raise AuthError("Токен Яндекса не задан")
         last = None
@@ -61,6 +61,8 @@ class YandexClient:
                 desc = body.get("description") or body.get("message") or r.text[:300]
                 if r.status_code == 401:
                     raise AuthError(f"Яндекс: токен не принят ({desc})", status=r.status_code)
+                if r.status_code == 403 and not forbidden_is_auth:
+                    raise ApiError(f"Яндекс: доступ запрещён ({desc})", status=403)
                 if r.status_code == 403:
                     raise AuthError(f"Яндекс: нет доступа ({desc}). Проверьте права приложения "
                                     f"(нужно «Чтение всего Диска»).", status=403)
@@ -94,22 +96,63 @@ class YandexClient:
         return [norm_item(i) for i in raw if i.get("type", "file") == "file"], len(raw)
 
     # ---- обход папки ----
-    def dir_page(self, path, offset, limit=1000):
+    def dir_page(self, path, offset, limit=1000, tries=8):
         """Возвращает (files, subdirs, total)."""
         fields = ",".join(f"_embedded.items.{f}" for f in ITEM_FIELDS.split(",")) + \
             ",_embedded.total,_embedded.limit,_embedded.offset,type,path"
         data = self._get(f"{API}/resources",
                          params={"path": path, "limit": limit, "offset": offset, "fields": fields,
-                                 "sort": "name"})
+                                 "sort": "name"}, tries=tries,
+                         forbidden_is_auth=not path.startswith("photounlim:"))
         emb = data.get("_embedded") or {}
         items = emb.get("items") or []
         files = [norm_item(i) for i in items if i.get("type") == "file"]
         dirs = [i["path"] for i in items if i.get("type") == "dir"]
         return files, dirs, int(emb.get("total") or 0), len(items)
 
+    # ---- раздел «Фото»: безлимитная автозагрузка (photounlim) ----
+    # Официально не документирован. Пробуем все известные варианты; какой сработал — запоминаем.
+    PHOTOUNLIM_METHODS = ("tree", "flat")
+
+    def photounlim_flat_page(self, offset, limit=1000):
+        """Вариант 2: GET /v1/disk/photounlim/resources/last-modified (замечен в приложениях Яндекса)."""
+        data = self._get(f"{API}/photounlim/resources/last-modified",
+                         params={"limit": limit, "offset": offset}, tries=3, forbidden_is_auth=False)
+        raw = data.get("items") or (data.get("_embedded") or {}).get("items") or []
+        return [norm_item(i) for i in raw if i.get("type", "file") == "file"], len(raw)
+
+    def probe_photounlim(self):
+        """Проверяет, какими способами виден раздел безлимитных фото. Возвращает (метод|None, отчёт)."""
+        report = []
+        try:
+            files, dirs, total, _ = self.dir_page("photounlim:/", 0, 1, tries=3)
+            report.append(f"resources?path=photounlim:/ — работает, элементов: {total}")
+            if total:
+                return "tree", report
+        except ApiError as e:
+            report.append(f"resources?path=photounlim:/ — {e}")
+        try:
+            files, raw = self.photounlim_flat_page(0, 1)
+            report.append(f"photounlim/resources/last-modified — работает, получено {raw}")
+            if raw:
+                return "flat", report
+        except ApiError as e:
+            report.append(f"photounlim/resources/last-modified — {e}")
+        return None, report
+
     # ---- скачивание ----
     def download_href(self, path):
-        data = self._get(f"{API}/resources/download", params={"path": path})
+        if path.startswith("photounlim:"):
+            try:
+                data = self._get(f"{API}/resources/download", params={"path": path}, tries=4,
+                                 forbidden_is_auth=False)
+            except ApiError as e:
+                if e.retryable:
+                    raise
+                data = self._get(f"{API}/photounlim/resources/download", params={"path": path}, tries=4,
+                                 forbidden_is_auth=False)
+        else:
+            data = self._get(f"{API}/resources/download", params={"path": path})
         href = data.get("href")
         if not href:
             raise ApiError(f"Яндекс не выдал ссылку на скачивание: {data}")

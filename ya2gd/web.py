@@ -126,6 +126,10 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/scan/start":
                 ok = e.start_scan(bool(b.get("fresh")))
                 return self._send(200, {"ok": ok})
+            if p == "/api/scan/local":
+                return self._send(200, {"ok": e.start_scan(only_local=True)})
+            if p == "/api/local/check":
+                return self._send(200, e.check_local_dirs())
             if p == "/api/scan/stop":
                 e.stop_scanning()
                 return self._send(200, {"ok": True})
