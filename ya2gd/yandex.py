@@ -1,0 +1,151 @@
+"""Клиент REST API Яндекс Диска (https://yandex.ru/dev/disk-api/doc/ru/).
+
+Используемые методы:
+- GET /v1/disk                       — информация о Диске (проверка токена);
+- GET /v1/disk/resources/files       — плоский список ВСЕХ файлов Диска (без обхода папок);
+- GET /v1/disk/resources?path=...    — содержимое папки (обход дерева, в т.ч. photounlim:/);
+- GET /v1/disk/resources/download    — временная ссылка на скачивание файла.
+"""
+import time
+
+from .http_util import (ApiError, AuthError, NETWORK_ERRORS, RateLimited, backoff,
+                        env_url, session, CONNECT_TIMEOUT, READ_TIMEOUT)
+
+API = env_url("YA2GD_YANDEX_API", "https://cloud-api.yandex.net/v1/disk")
+
+ITEM_FIELDS = "path,name,type,size,md5,sha256,modified,created,mime_type,media_type,exif"
+
+
+def norm_item(it):
+    path = it["path"]
+    source = "photounlim" if path.startswith("photounlim:") else "disk"
+    exif = it.get("exif") or {}
+    return {
+        "path": path,
+        "source": source,
+        "name": it.get("name") or path.rsplit("/", 1)[-1],
+        "size": int(it.get("size") or 0),
+        "md5": it.get("md5"),
+        "sha256": it.get("sha256"),
+        "modified": it.get("modified"),
+        "created": it.get("created"),
+        "taken": exif.get("date_time"),
+        "mime": it.get("mime_type") or "application/octet-stream",
+        "media_type": it.get("media_type"),
+    }
+
+
+class YandexClient:
+    def __init__(self, token, stop_event=None, log=None):
+        self.token = (token or "").strip()
+        self.stop_event = stop_event
+        self.log = log or (lambda *a, **k: None)
+
+    def _headers(self):
+        return {"Authorization": f"OAuth {self.token}", "Accept": "application/json"}
+
+    def _get(self, url, params=None, tries=8):
+        if not self.token:
+            raise AuthError("Токен Яндекса не задан")
+        last = None
+        for attempt in range(tries):
+            try:
+                r = session().get(url, params=params, headers=self._headers(),
+                                  timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
+            except NETWORK_ERRORS as e:
+                last = ApiError(f"Сеть (Яндекс): {e}", retryable=True)
+            else:
+                if r.status_code == 200:
+                    return r.json()
+                body = _safe_json(r)
+                desc = body.get("description") or body.get("message") or r.text[:300]
+                if r.status_code == 401:
+                    raise AuthError(f"Яндекс: токен не принят ({desc})", status=r.status_code)
+                if r.status_code == 403:
+                    raise AuthError(f"Яндекс: нет доступа ({desc}). Проверьте права приложения "
+                                    f"(нужно «Чтение всего Диска»).", status=403)
+                if r.status_code == 404:
+                    raise ApiError(f"Яндекс: не найдено ({desc})", status=404)
+                if r.status_code == 429:
+                    last = RateLimited(f"Яндекс: слишком много запросов", status=429, retryable=True)
+                elif r.status_code >= 500:
+                    last = ApiError(f"Яндекс: ошибка сервера {r.status_code} ({desc})",
+                                    status=r.status_code, retryable=True)
+                else:
+                    raise ApiError(f"Яндекс: HTTP {r.status_code} ({desc})", status=r.status_code, body=body)
+            delay = backoff(attempt, base=2, cap=60)
+            self.log(f"{last} — повтор через {delay:.0f} c", level="warn")
+            if self.stop_event is not None and self.stop_event.wait(delay):
+                break
+            elif self.stop_event is None:
+                time.sleep(delay)
+        raise last or ApiError("Яндекс: не удалось выполнить запрос")
+
+    # ---- информация ----
+    def disk_info(self):
+        return self._get(API)
+
+    # ---- плоский список всех файлов ----
+    def files_page(self, offset, limit=1000):
+        data = self._get(f"{API}/resources/files",
+                         params={"limit": limit, "offset": offset,
+                                 "fields": ",".join(f"items.{f}" for f in ITEM_FIELDS.split(",")) + ",limit,offset"})
+        raw = data.get("items", [])
+        return [norm_item(i) for i in raw if i.get("type", "file") == "file"], len(raw)
+
+    # ---- обход папки ----
+    def dir_page(self, path, offset, limit=1000):
+        """Возвращает (files, subdirs, total)."""
+        fields = ",".join(f"_embedded.items.{f}" for f in ITEM_FIELDS.split(",")) + \
+            ",_embedded.total,_embedded.limit,_embedded.offset,type,path"
+        data = self._get(f"{API}/resources",
+                         params={"path": path, "limit": limit, "offset": offset, "fields": fields,
+                                 "sort": "name"})
+        emb = data.get("_embedded") or {}
+        items = emb.get("items") or []
+        files = [norm_item(i) for i in items if i.get("type") == "file"]
+        dirs = [i["path"] for i in items if i.get("type") == "dir"]
+        return files, dirs, int(emb.get("total") or 0), len(items)
+
+    # ---- скачивание ----
+    def download_href(self, path):
+        data = self._get(f"{API}/resources/download", params={"path": path})
+        href = data.get("href")
+        if not href:
+            raise ApiError(f"Яндекс не выдал ссылку на скачивание: {data}")
+        return href
+
+    def open_stream(self, path, offset=0):
+        """Открывает поток скачивания с нужного байта. Возвращает (response, real_offset).
+
+        Если сервер проигнорировал Range (ответил 200), лишние байты будут пропущены вызывающим.
+        """
+        href = self.download_href(path)
+        headers = {"Accept-Encoding": "identity"}
+        if offset:
+            headers["Range"] = f"bytes={offset}-"
+        r = session().get(href, headers=headers, stream=True, allow_redirects=True,
+                          timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
+        if r.status_code == 206:
+            return r, offset
+        if r.status_code == 200:
+            return r, 0
+        text = r.text[:300]
+        r.close()
+        if r.status_code in (401, 403):
+            raise ApiError(f"Яндекс: ссылка скачивания отклонена HTTP {r.status_code}: {text}",
+                           status=r.status_code, retryable=True)
+        if r.status_code == 404:
+            raise ApiError("Яндекс: файл не найден при скачивании (удалён?)", status=404)
+        if r.status_code == 416:
+            raise ApiError("Яндекс: неверный диапазон (файл изменился?)", status=416)
+        raise ApiError(f"Яндекс: скачивание HTTP {r.status_code}: {text}", status=r.status_code,
+                       retryable=r.status_code >= 500 or r.status_code == 429)
+
+
+def _safe_json(r):
+    try:
+        v = r.json()
+        return v if isinstance(v, dict) else {}
+    except ValueError:
+        return {}

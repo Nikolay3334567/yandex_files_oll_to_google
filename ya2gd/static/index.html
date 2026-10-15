@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Яндекс → Google</title>
+<style>
+:root{
+  --bg:#f3f4f6; --card:#fff; --fg:#1b1f24; --muted:#6b7280; --line:#e5e7eb;
+  --acc:#2563eb; --ok:#16a34a; --warn:#d97706; --err:#dc2626; --chip:#eef2ff;
+  --bar:#e5e7eb; --input:#fff;
+}
+@media (prefers-color-scheme: dark){
+  :root{--bg:#0f1115; --card:#181b21; --fg:#e6e8eb; --muted:#9aa3ae; --line:#2a2f37;
+    --acc:#5b8cff; --ok:#34c759; --warn:#f0a43a; --err:#ff5a52; --chip:#22283a; --bar:#2a2f37; --input:#11141a;}
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{position:sticky;top:0;z-index:5;background:var(--card);border-bottom:1px solid var(--line);padding:12px 20px}
+.wrap{max-width:1180px;margin:0 auto;padding:16px}
+h1{font-size:18px;margin:0}
+h2{font-size:15px;margin:0 0 10px}
+.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
+.muted{color:var(--muted)} .small{font-size:12px}
+button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--fg);padding:7px 12px;border-radius:7px;cursor:pointer}
+button:hover{border-color:var(--acc)}
+button.primary{background:var(--acc);border-color:var(--acc);color:#fff}
+button.danger{color:var(--err)}
+button:disabled{opacity:.45;cursor:default}
+input,select{font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:7px;background:var(--input);color:var(--fg);width:100%}
+input[type=checkbox]{width:auto}
+label{display:block;margin:8px 0 3px;color:var(--muted);font-size:12px}
+.chk{display:flex;gap:8px;align-items:center;color:var(--fg);font-size:14px;margin:8px 0}
+.badge{display:inline-block;padding:2px 9px;border-radius:99px;font-size:12px;background:var(--chip)}
+.b-ok{background:color-mix(in srgb,var(--ok) 18%,transparent);color:var(--ok)}
+.b-warn{background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}
+.b-err{background:color-mix(in srgb,var(--err) 18%,transparent);color:var(--err)}
+.b-acc{background:color-mix(in srgb,var(--acc) 18%,transparent);color:var(--acc)}
+.bar{height:10px;background:var(--bar);border-radius:99px;overflow:hidden}
+.bar>div{height:100%;background:var(--acc);transition:width .4s}
+.bar.big{height:16px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+.tile{border:1px solid var(--line);border-radius:9px;padding:10px;cursor:pointer}
+.tile:hover{border-color:var(--acc)}
+.tile .v{font-size:20px;font-weight:600}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+td.path{word-break:break-all}
+.log{height:260px;overflow:auto;font:12px/1.5 ui-monospace,Consolas,monospace;background:var(--input);border:1px solid var(--line);border-radius:8px;padding:8px}
+.log .warn{color:var(--warn)} .log .error{color:var(--err)}
+.res{white-space:pre-wrap;font-size:12px;margin-top:8px}
+.banner{display:none;background:var(--err);color:#fff;padding:8px 20px;text-align:center}
+.active-item{margin:8px 0}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;font-size:13px}
+a{color:var(--acc)}
+@media (max-width:600px){.wrap{padding:16px}.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="banner" id="banner">Программа не отвечает. Возможно, окно с программой закрыто — запустите её снова, перенос продолжится с того же места.</div>
+<header>
+  <div class="row" style="justify-content:space-between">
+    <div class="row"><h1>Яндекс Диск → Google Drive</h1><span id="stateBadge" class="badge">…</span></div>
+    <div class="row">
+      <button class="primary" id="btnStart" onclick="post('/api/transfer/start')">▶ Старт</button>
+      <button id="btnPause" onclick="post('/api/transfer/pause')">⏸ Пауза</button>
+    </div>
+  </div>
+  <div style="margin-top:10px">
+    <div class="bar big"><div id="mainBar" style="width:0"></div></div>
+    <div class="row small muted" style="margin-top:5px;justify-content:space-between">
+      <span id="mainText">—</span><span id="speedText"></span>
+    </div>
+    <div class="small" id="reason" style="color:var(--warn)"></div>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="card">
+    <div class="tiles" id="tiles"></div>
+  </div>
+
+  <div class="card">
+    <h2>Сейчас передаётся</h2>
+    <div id="active" class="muted">Ничего</div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>1. Яндекс Диск <span id="yaBadge" class="badge"></span></h2>
+      <label>OAuth-токен Яндекса</label>
+      <input id="yandex_token" placeholder="y0_AgAAAA…" autocomplete="off">
+      <details class="small" style="margin-top:8px"><summary>Как получить токен</summary>
+        <ol>
+          <li>Откройте <a href="https://oauth.yandex.ru/client/new" target="_blank">oauth.yandex.ru/client/new</a>, создайте приложение
+            (платформа «Веб-сервисы», Redirect URI: <code>https://oauth.yandex.ru/verification_code</code>),
+            доступ: <b>Яндекс Диск REST API → «Чтение всего Диска»</b>.</li>
+          <li>Вставьте ClientID сюда и нажмите «Получить токен»:
+            <div class="row" style="margin-top:4px"><input id="yandex_client_id" placeholder="ClientID" style="flex:1">
+            <button onclick="yaToken()">Получить токен</button></div></li>
+          <li>Скопируйте показанный токен в поле выше и нажмите «Сохранить и проверить».</li>
+        </ol>
+      </details>
+      <div class="row" style="margin-top:10px">
+        <button class="primary" onclick="saveYandex()">Сохранить и проверить</button>
+      </div>
+      <div class="res" id="yaRes"></div>
+    </div>
+
+    <div class="card">
+      <h2>2. Google Drive <span id="gBadge" class="badge"></span></h2>
+      <label>Client ID (тип «Desktop app»)</label>
+      <input id="google_client_id" placeholder="…apps.googleusercontent.com">
+      <label>Client secret</label>
+      <input id="google_client_secret" placeholder="GOCSPX-…" autocomplete="off">
+      <details class="small" style="margin-top:8px"><summary>Как получить</summary>
+        <ol>
+          <li><a href="https://console.cloud.google.com/projectcreate" target="_blank">Создайте проект</a> в Google Cloud,
+            включите <a href="https://console.cloud.google.com/apis/library/drive.googleapis.com" target="_blank">Google Drive API</a>.</li>
+          <li>«OAuth consent screen» / «Google Auth Platform»: тип External, добавьте себя в тестовые пользователи,
+            потом нажмите <b>Publish app (In production)</b> — иначе токен будет умирать через 7 дней.</li>
+          <li>«Credentials → Create credentials → OAuth client ID → <b>Desktop app</b>». Скопируйте ID и secret сюда.</li>
+          <li>Нажмите «Войти в Google». Предупреждение «приложение не проверено» — это ваше приложение: «Дополнительно → Перейти».</li>
+        </ol>
+      </details>
+      <div class="row" style="margin-top:10px">
+        <button class="primary" onclick="googleLogin()">Войти в Google</button>
+        <button onclick="testGoogle()">Проверить</button>
+        <button class="danger" onclick="post('/api/google/logout').then(loadSettings)">Выйти</button>
+      </div>
+      <div class="res" id="gRes"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>3. Сканирование Яндекс Диска <span id="scanBadge" class="badge"></span></h2>
+    <div class="muted small" id="scanText"></div>
+    <div class="row" style="margin-top:10px">
+      <button class="primary" onclick="post('/api/scan/start',{fresh:false})" id="btnScan">Сканировать / продолжить</button>
+      <button onclick="if(confirm('Пересканировать с начала? Уже перенесённые файлы останутся отмеченными.'))post('/api/scan/start',{fresh:true})">Сканировать заново</button>
+      <button onclick="post('/api/scan/stop')">Остановить</button>
+    </div>
+    <div class="muted small" style="margin-top:6px">Перенос можно запускать, не дожидаясь конца сканирования: найденные файлы сразу попадают в очередь.</div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Настройки</h2>
+      <div class="grid" style="grid-template-columns:1fr 1fr;gap:0 12px">
+        <div><label>Папка на Google Drive</label><input id="drive_root"></div>
+        <div><label>Папка для безлимитных фото</label><input id="photounlim_folder"></div>
+        <div><label>Раскладка безлимитных фото</label>
+          <select id="photounlim_split"><option value="month">Год / месяц</option><option value="year">По годам</option><option value="none">Всё в одну папку</option></select></div>
+        <div><label>Способ сканирования</label>
+          <select id="scan_mode"><option value="flat">Плоский список всех файлов (быстро)</option><option value="tree">Обход папок</option></select></div>
+        <div><label>Потоков одновременно</label><input id="workers" type="number" min="1" max="16"></div>
+        <div><label>Размер куска, МБ</label><input id="chunk_mb" type="number" min="1" max="256"></div>
+        <div><label>Попыток на файл</label><input id="max_attempts" type="number" min="1"></div>
+        <div><label>Порт интерфейса</label><input id="port" type="number"></div>
+      </div>
+      <div class="chk"><input type="checkbox" id="include_photounlim"><span>Сканировать раздел безлимитных фото (photounlim)</span></div>
+      <div class="chk"><input type="checkbox" id="skip_existing"><span>Не заливать повторно файл, который уже лежит на Drive (то же имя и MD5)</span></div>
+      <div class="chk"><input type="checkbox" id="verify_md5"><span>Проверять MD5 после загрузки</span></div>
+      <div class="chk"><input type="checkbox" id="autostart"><span>При запуске программы сам продолжать прерванный перенос</span></div>
+      <button class="primary" onclick="saveSettings()">Сохранить настройки</button>
+      <span class="small muted" id="setRes"></span>
+      <div class="small muted" style="margin-top:6px">Число потоков применяется при следующем «Старте».</div>
+    </div>
+
+    <div class="card">
+      <h2>Обслуживание</h2>
+      <div class="kv" id="taskBox"></div>
+      <div style="display:grid;gap:8px;margin-top:10px">
+        <button onclick="post('/api/actions/retry_errors')">↻ Повторить файлы с ошибками</button>
+        <div class="small muted">Если удалили что-то на Google Drive и хотите докачать удалённое:</div>
+        <button onclick="post('/api/actions/verify_drive')">🔎 Сверить с Google Drive (удалённое → снова в очередь)</button>
+        <div class="small muted">Полностью начать перенос заново (список файлов сохранится):</div>
+        <button class="danger" onclick="if(confirm('Поставить ВСЕ файлы в очередь заново?'))post('/api/actions/requeue_all')">⟲ Начать перенос заново</button>
+        <button class="danger" onclick="if(confirm('Удалить всю базу (список файлов и прогресс)? Файлы на Drive не трогаются.'))post('/api/actions/reset_db')">🗑 Очистить базу полностью</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Файлы</h2>
+    <div class="row">
+      <select id="fStatus" style="width:auto" onchange="page=0;loadFiles()">
+        <option value="">Все</option><option value="pending">В очереди</option><option value="active">В работе</option>
+        <option value="done">Готово</option><option value="error">Ошибки</option><option value="skipped">Пропущены</option>
+      </select>
+      <input id="fQuery" placeholder="Поиск по пути" style="flex:1;min-width:160px" oninput="page=0;clearTimeout(window._qt);window._qt=setTimeout(loadFiles,300)">
+      <button onclick="page=Math.max(0,page-1);loadFiles()">←</button>
+      <span id="fPage" class="small muted"></span>
+      <button onclick="page++;loadFiles()">→</button>
+    </div>
+    <div style="overflow-x:auto"><table>
+      <thead><tr><th>Путь на Яндексе</th><th>Размер</th><th>Статус</th><th>Примечание / ошибка</th><th></th></tr></thead>
+      <tbody id="fBody"></tbody>
+    </table></div>
+  </div>
+
+  <div class="card">
+    <h2>Журнал</h2>
+    <div class="log" id="log"></div>
+    <div class="small muted" style="margin-top:6px">Полный журнал: файл <code>data/ya2gd.log</code> рядом с программой.</div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const ST = {pending:'В очереди', active:'В работе', done:'Готово', error:'Ошибка', skipped:'Пропущен'};
+const STB = {pending:'', active:'b-acc', done:'b-ok', error:'b-err', skipped:'b-warn'};
+let page = 0, logSeq = 0, settings = {};
+
+function fmtB(b){ if(b==null) return '—'; const u=['Б','КБ','МБ','ГБ','ТБ']; let i=0; b=+b;
+  while(b>=1024&&i<u.length-1){b/=1024;i++} return (i?b.toFixed(b<10?2:1):b)+' '+u[i]; }
+function fmtT(s){ if(s==null||!isFinite(s)) return '—'; s=Math.round(s); const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
+  return (d?d+' д ':'')+(d||h?h+' ч ':'')+m+' мин'; }
+function esc(s){ return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+async function api(url, opts={}){
+  const r = await fetch(url, opts);
+  const j = await r.json().catch(()=>({error:'Некорректный ответ'}));
+  if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
+  return j;
+}
+async function post(url, body){
+  try{
+    const j = await api(url,{method:'POST',headers:{'Content-Type':'application/json','X-Ya2gd':'1'},body:JSON.stringify(body||{})});
+    refresh(); return j;
+  }catch(e){ alert(e.message); throw e; }
+}
+
+async function loadSettings(){
+  settings = await api('/api/settings');
+  for(const [k,v] of Object.entries(settings)){
+    const el = $(k); if(!el) continue;
+    if(el.type==='checkbox') el.checked=!!v;
+    else if(k+'_set' in settings){ el.value=''; el.placeholder = settings[k+'_set'] ? 'сохранён ('+v+') — введите новый, чтобы заменить' : ''; }
+    else el.value = v ?? '';
+  }
+  $('yaBadge').textContent = settings.yandex_token_set ? 'токен задан' : 'не настроен';
+  $('yaBadge').className = 'badge ' + (settings.yandex_token_set ? 'b-ok' : 'b-warn');
+  $('gBadge').textContent = settings.google_refresh_token_set ? ('вход: '+(settings.google_email||'выполнен')) : 'не авторизован';
+  $('gBadge').className = 'badge ' + (settings.google_refresh_token_set ? 'b-ok' : 'b-warn');
+}
+function collect(ids){ const o={}; for(const k of ids){ const el=$(k); o[k] = el.type==='checkbox'?el.checked:(el.type==='number'?+el.value:el.value.trim()); } return o; }
+
+async function saveYandex(){
+  $('yaRes').textContent='Проверяю…';
+  try{
+    await post('/api/settings', collect(['yandex_token','yandex_client_id']));
+    await loadSettings();
+    const r = await api('/api/yandex/test',{method:'POST',headers:{'X-Ya2gd':'1'}});
+    $('yaRes').innerHTML = `✅ Токен рабочий. Пользователь: <b>${esc(r.user)}</b>\nЗанято: ${fmtB(r.used)} из ${fmtB(r.total)}`+
+      (r.photounlim_size?`\nБезлимитные фото: ${fmtB(r.photounlim_size)}`:'')+
+      `\nСписок всех файлов: ${esc(r.files_api)}\nРаздел безлимитных фото: ${esc(r.photounlim)}`;
+  }catch(e){ $('yaRes').textContent='❌ '+e.message; }
+}
+function yaToken(){
+  const id = $('yandex_client_id').value.trim(); if(!id){alert('Введите ClientID');return;}
+  post('/api/settings',{yandex_client_id:id});
+  window.open('https://oauth.yandex.ru/authorize?response_type=token&client_id='+encodeURIComponent(id),'_blank');
+}
+async function googleLogin(){
+  await post('/api/settings', collect(['google_client_id','google_client_secret']));
+  location.href='/oauth/google/start';
+}
+async function testGoogle(){
+  $('gRes').textContent='Проверяю…';
+  try{
+    const r = await api('/api/google/test',{method:'POST',headers:{'X-Ya2gd':'1'}});
+    $('gRes').innerHTML = `✅ Аккаунт: <b>${esc(r.email)}</b>\nМесто: занято ${fmtB(r.usage)} из ${r.limit?fmtB(r.limit):'∞'}`+
+      (r.limit?` (свободно ${fmtB(r.limit-r.usage)})`:'')+`\n${esc(r.write)}`;
+    loadSettings();
+  }catch(e){ $('gRes').textContent='❌ '+e.message; }
+}
+async function saveSettings(){
+  try{
+    await post('/api/settings', collect(['drive_root','photounlim_folder','photounlim_split','scan_mode','workers','chunk_mb',
+      'max_attempts','port','include_photounlim','skip_existing','verify_md5','autostart']));
+    $('setRes').textContent='Сохранено'; setTimeout(()=>$('setRes').textContent='',2000); loadSettings();
+  }catch(e){}
+}
+
+function tile(key,label,obj,cls){
+  return `<div class="tile" onclick="$('fStatus').value='${key}';page=0;loadFiles()"><div class="small muted">${label}</div>
+  <div class="v ${cls||''}">${(obj?.count||0).toLocaleString('ru')}</div><div class="small muted">${fmtB(obj?.bytes||0)}</div></div>`;
+}
+
+async function refresh(){
+  let s;
+  try{ s = await api('/api/status'); $('banner').style.display='none'; }
+  catch(e){ $('banner').style.display='block'; return; }
+  const bs = s.stats.by_status, sum = k=>bs[k]||{count:0,bytes:0};
+  const total = Object.values(bs).reduce((a,b)=>({count:a.count+b.count,bytes:a.bytes+b.bytes}),{count:0,bytes:0});
+  const done = sum('done').bytes + sum('skipped').bytes + s.stats.partial_bytes;
+  const pct = total.bytes ? done/total.bytes*100 : 0;
+  $('mainBar').style.width = pct.toFixed(2)+'%';
+  $('mainText').textContent = `${fmtB(done)} из ${fmtB(total.bytes)} (${pct.toFixed(1)}%) · файлов готово ${(sum('done').count+sum('skipped').count).toLocaleString('ru')} из ${total.count.toLocaleString('ru')}`;
+  $('speedText').textContent = s.speed ? `${fmtB(s.speed)}/с · осталось ≈ ${fmtT(s.eta)}` : '';
+  const t = s.transfer;
+  const map = {idle:['Ожидание',''],running:['Идёт перенос','b-acc'],pausing:['Останавливаюсь…','b-warn'],paused:['На паузе','b-warn'],done:['Завершено','b-ok']};
+  let [txt,cls] = map[t.state]||[t.state,''];
+  if(t.state==='running' && t.cooldown_until) { txt='Ждём лимит Google до '+new Date(t.cooldown_until*1000).toLocaleTimeString('ru'); cls='b-warn'; }
+  $('stateBadge').textContent = txt + (t.state==='running'?` · потоков ${t.workers}`:'');
+  $('stateBadge').className = 'badge '+cls;
+  $('reason').textContent = t.reason ? '⚠ '+t.reason : '';
+  $('btnStart').disabled = t.state==='running' || t.state==='pausing';
+  $('btnPause').disabled = t.state!=='running';
+
+  $('tiles').innerHTML = tile('','Всего',total) + tile('done','Готово',sum('done'),'') + tile('pending','В очереди',sum('pending'))+
+    tile('active','В работе',sum('active')) + tile('error','Ошибки',sum('error'), sum('error').count?'b-err':'') + tile('skipped','Пропущено',sum('skipped'));
+
+  $('active').innerHTML = s.active.length ? s.active.map(a=>{
+    const p = a.size? a.done/a.size*100 : 100;
+    return `<div class="active-item"><div class="row small" style="justify-content:space-between"><span class="path">${esc(a.path)}</span>
+      <span class="muted">${esc(a.stage)} · ${fmtB(a.done)} / ${fmtB(a.size)}</span></div><div class="bar"><div style="width:${p.toFixed(1)}%"></div></div></div>`;
+  }).join('') : '<span class="muted">Ничего</span>';
+
+  const sc = s.scan;
+  const smap = {never:['не выполнялось','b-warn'],running:['идёт','b-acc'],done:['завершено','b-ok'],stopped:['остановлено','b-warn'],interrupted:['прервано','b-err']};
+  const [stx,scl] = sc.running ? smap.running : (smap[sc.state]||[sc.state,'']);
+  $('scanBadge').textContent = stx; $('scanBadge').className='badge '+scl;
+  $('scanText').textContent = `Найдено в этом проходе: ${sc.found.toLocaleString('ru')} файлов` +
+    (sc.phase&&sc.phase!=='done'?` · этап: ${sc.phase==='main'?'основной Диск':'безлимитные фото'}`:'') + (sc.error?` · ошибка: ${sc.error}`:'');
+  $('btnScan').disabled = sc.running;
+  const tk = s.task;
+  $('taskBox').innerHTML = tk.name ? `<span class="muted">Операция:</span><span>${esc(tk.name)} — ${tk.state==='running'?'выполняется…':(tk.state==='error'?'ошибка':'готово')}</span>
+    <span class="muted">Итог:</span><span>${esc(tk.msg)}</span>` : '';
+  loadLog();
+}
+
+async function loadLog(){
+  const items = await api('/api/log?after='+logSeq).catch(()=>[]);
+  if(!items.length) return;
+  const box = $('log'), atEnd = box.scrollTop+box.clientHeight >= box.scrollHeight-20;
+  for(const it of items){
+    logSeq = it.seq;
+    const d = document.createElement('div'); d.className=it.level;
+    d.textContent = new Date(it.ts*1000).toLocaleTimeString('ru')+'  '+it.msg; box.appendChild(d);
+  }
+  while(box.childNodes.length>1500) box.removeChild(box.firstChild);
+  if(atEnd) box.scrollTop = box.scrollHeight;
+}
+
+async function loadFiles(){
+  const lim=100, st=$('fStatus').value, q=$('fQuery').value.trim();
+  const r = await api(`/api/files?status=${st}&q=${encodeURIComponent(q)}&offset=${page*lim}&limit=${lim}`);
+  const pages = Math.max(1,Math.ceil(r.total/lim)); if(page>=pages){page=pages-1;}
+  $('fPage').textContent = `стр. ${page+1} из ${pages} · ${r.total.toLocaleString('ru')} файлов`;
+  $('fBody').innerHTML = r.items.map(f=>`<tr><td class="path">${esc(f.path)}</td><td>${fmtB(f.size)}</td>
+    <td><span class="badge ${STB[f.status]}">${ST[f.status]||f.status}</span>${f.attempts?`<div class="small muted">попыток: ${f.attempts}</div>`:''}
+    ${f.status==='pending'&&f.bytes_done?`<div class="small muted">передано ${fmtB(f.bytes_done)}</div>`:''}</td>
+    <td class="small">${esc(f.note||'')} <span style="color:var(--err)">${esc(f.last_error||'')}</span>
+    ${f.gd_id?`<div><a target="_blank" href="https://drive.google.com/file/d/${esc(f.gd_id)}/view">открыть на Drive</a></div>`:''}</td>
+    <td style="white-space:nowrap">${f.status==='error'||f.status==='skipped'?`<button onclick="fa(${f.id},'retry')">↻</button>`:''}
+    ${f.status==='pending'||f.status==='error'?`<button title="Пропустить" onclick="fa(${f.id},'skip')">⏭</button>`:''}
+    ${f.status==='done'?`<button title="Загрузить заново" onclick="fa(${f.id},'requeue')">⟲</button>`:''}</td></tr>`).join('');
+}
+async function fa(id,action){ await post('/api/files/action',{id,action}); loadFiles(); }
+
+loadSettings(); refresh(); loadFiles();
+setInterval(refresh, 1500);
+setInterval(()=>{ if(document.visibilityState==='visible') loadFiles(); }, 10000);
+</script>
+</body>
+</html>
