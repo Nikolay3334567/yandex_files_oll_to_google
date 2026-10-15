@@ -1,65 +1,66 @@
-"""Движок: сканирование Яндекс Диска и перенос файлов на Google Drive.
+"""Движок: получение списка файлов Яндекс Диска и потоковый перенос на Google Drive.
 
-Устойчивость:
-- всё состояние в SQLite; после падения «зависшие» файлы возвращаются в очередь;
-- большой файл продолжается с байта, который Google подтвердил (резюмируемая сессия);
-- сканирование продолжается с сохранённого смещения;
-- ошибки авторизации/места на диске ставят перенос на паузу, а не «сжигают» попытки;
-- лимиты Google (в т.ч. суточные 750 ГБ) → общая пауза с нарастающей задержкой.
+Источники (ничего не сохраняется на компьютер — байты идут Яндекс → память → Google):
+- «Файлы» Диска: официальный REST API, плоский список /v1/disk/resources/files;
+- раздел «Фото» (безлимитная автозагрузка): веб-API Диска (mpfs/list + mpfs/url) по кукам,
+  либо REST, если Яндекс когда-нибудь откроет его там.
+
+Надёжность:
+- состояние в SQLite; после падения файлы «в работе» возвращаются в очередь;
+- большой файл продолжается с байта, который подтвердил Google (резюмируемая сессия);
+- маленький файл до загрузки сверяется по MD5 с Яндексом, после — Google сверяет MD5 сам;
+- файлы на молчащих серверах Яндекса откладываются (попытки не тратятся) и повторяются позже;
+- дубли исключены: перед загрузкой проверяется, нет ли уже в папке файла с тем же именем и MD5.
 """
 import collections
+import csv
+import hashlib
+import io
 import os
+import re
 import threading
 import time
 import traceback
 
 from .core import Log, Settings, data_dir
 from .db import DB
+from .fetch import DEAD, StorageDown, open_download
 from .gdrive import APP_PROP, DriveClient, GoogleAuth
-from .http_util import ApiError, AuthError, FatalPause, NETWORK_ERRORS, RateLimited, backoff
+from .http_util import (ApiError, AuthError, FatalPause, NETWORK_ERRORS, RateLimited, WebAuthError,
+                        backoff)
 from .yandex import YandexClient
-from . import local
+from .yaweb import UNLIM_ROOT, YandexWeb
+
+DEFER_SEC = float(os.environ.get("YA2GD_DEAD_HOST_TTL", "1800"))
+STOP_ERRORS = (AuthError, FatalPause, RateLimited, StorageDown, WebAuthError)
 
 
 class Paused(Exception):
     pass
 
 
-def _with_date(base, row, split, fallback_dates=True):
-    """base/<год>[/<год-месяц>] по дате съёмки (EXIF → имя файла → дата создания/изменения)."""
-    date = (row.get("taken") or local.date_from_name(row.get("name") or "") or
-            (row.get("created") or row.get("modified") if fallback_dates else None) or "").replace(":", "-")[:10]
-    if len(date) == 10 and date[4] == "-":
-        if split == "year":
-            return f"{base}/{date[:4]}", True
-        if split == "month":
-            return f"{base}/{date[:4]}/{date[:7]}", True
-    return base, False
+def name_date(name):
+    """Дата из имени вида «2019-05-04 10-00-00.JPG» / «IMG_20190504_…»."""
+    m = re.search(r"(?<!\d)((?:19|20)\d\d)[-_.]?(0[1-9]|1[0-2])[-_.]?(0[1-9]|[12]\d|3[01])", name or "")
+    return f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else None
 
 
 def drive_dir_for(row, s):
-    """Относительный путь папки на Drive для файла."""
+    """Относительный путь папки на Drive для файла (структура как на Яндексе)."""
     path = row["path"]
     if row["source"] == "photounlim":
         rel = path.split(":", 1)[1].lstrip("/")
         sub = rel.rsplit("/", 1)[0] if "/" in rel else ""
-        base, _ = _with_date(s["photounlim_folder"] or "Фото (безлимит)", row, s["photounlim_split"])
+        base = s["photounlim_folder"] or "Фото (безлимит)"
+        date = (row.get("taken") or name_date(row.get("name")) or row.get("created") or
+                row.get("modified") or "")[:10]
+        split = s["photounlim_split"]
+        if len(date) == 10 and date[4] == "-":
+            if split == "year":
+                base += "/" + date[:4]
+            elif split == "month":
+                base += f"/{date[:4]}/{date[:7]}"
         return f"{base}/{sub}" if sub else base
-    if row["source"] == "local":
-        full = path[len(local.PREFIX):]
-        base = s["local_folder"] or "Фото (безлимит)"
-        if s["local_split"] in ("year", "month"):
-            # у копий на компьютере дата изменения = дата скачивания, поэтому её не используем
-            dated, ok = _with_date(base, row, s["local_split"], fallback_dates=False)
-            return dated if ok else f"{base}/Без даты"
-        root = local.root_for(full, local.parse_dirs(s["local_dirs"]))
-        parent = os.path.dirname(full)
-        if root:
-            rel = os.path.relpath(parent, root)
-            parts = [os.path.basename(os.path.normpath(root))] + ([] if rel == "." else rel.split(os.sep))
-        else:
-            parts = [os.path.basename(parent)]
-        return "/".join([base] + [p for p in parts if p])
     rel = path.split(":", 1)[1].lstrip("/") if ":" in path else path.lstrip("/")
     return rel.rsplit("/", 1)[0] if "/" in rel else ""
 
@@ -74,6 +75,44 @@ def read_exact(raw, n, on_progress=None):
         if on_progress:
             on_progress(len(buf))
     return bytes(buf)
+
+
+class FolderIndex:
+    """Кэш содержимого папок Drive: имя → [(id, md5, size)]. Один запрос на папку, а не на файл."""
+
+    def __init__(self):
+        self._data = {}
+        self._lock = threading.Lock()
+        self._folder_locks = collections.defaultdict(threading.Lock)
+
+    def get(self, drive, folder_id):
+        with self._lock:
+            if folder_id in self._data:
+                return self._data[folder_id]
+            flock = self._folder_locks[folder_id]
+        with flock:
+            with self._lock:
+                if folder_id in self._data:
+                    return self._data[folder_id]
+            idx = collections.defaultdict(list)
+            for f in drive.list_children(folder_id):
+                idx[f["name"]].append((f["id"], f.get("md5Checksum"), int(f.get("size") or -1)))
+            with self._lock:
+                self._data[folder_id] = idx
+            return idx
+
+    def add(self, folder_id, name, fid, md5, size):
+        with self._lock:
+            if folder_id in self._data:
+                self._data[folder_id][name].append((fid, md5, size))
+
+    def drop(self, folder_id):
+        with self._lock:
+            self._data.pop(folder_id, None)
+
+    def clear(self):
+        with self._lock:
+            self._data.clear()
 
 
 class Engine:
@@ -100,15 +139,20 @@ class Engine:
         self.rate_hits = 0
         self.speed = collections.deque()
         self.scan_thread = None
-        self.scan_info = {"found": 0}
         self.task = {"name": "", "state": "idle", "msg": ""}
         self.task_thread = None
         self.google_state = os.urandom(16).hex()
         self._auth = None
+        self._auth_key = None
+        self.web_problem = ""            # куки раздела «Фото» не работают — только этот раздел ждёт
+        self.folder_index = FolderIndex()
 
     # ================================================================== клиенты
     def yandex(self, stop=None):
         return YandexClient(self.settings["yandex_token"], stop_event=stop, log=self.log)
+
+    def yaweb(self, stop=None):
+        return YandexWeb(self.settings["yandex_cookies"], stop_event=stop, log=self.log)
 
     def google_auth(self):
         s = self.settings
@@ -122,6 +166,12 @@ class Engine:
     def drive(self, stop=None):
         return DriveClient(self.google_auth(), db=self.db, stop_event=stop, log=self.log)
 
+    def photounlim_mode(self):
+        """Как достаём раздел «Фото»: web (куки) | rest | '' (никак)."""
+        if self.settings["yandex_cookies"]:
+            return "web"
+        return "rest" if self.db.get("photounlim.method") else ""
+
     # ================================================================== проверки
     def test_yandex(self):
         y = YandexClient(self.settings["yandex_token"], log=self.log)
@@ -129,26 +179,37 @@ class Engine:
         user = info.get("user") or {}
         res = {"ok": True, "user": user.get("display_name") or user.get("login"),
                "total": info.get("total_space"), "used": info.get("used_space"),
-               "photounlim_size": info.get("photounlim_size")}
+               "photounlim_size": int(info.get("photounlim_size") or 0)}
         try:
-            items, _ = y.files_page(0, 1)
+            y.files_page(0, 1)
             res["files_api"] = "работает"
         except ApiError as e:
             res["files_api"] = f"ошибка: {e}"
         method, report = y.probe_photounlim()
-        res["photounlim_method"] = method
-        res["photounlim_report"] = report
-        size = int(info.get("photounlim_size") or 0)
-        if method:
-            res["photounlim"] = "фото из раздела «Фото» доступны через API — будут перенесены напрямую"
-        elif size:
-            res["photounlim"] = ("в разделе «Фото» (безлимитная автозагрузка) лежат файлы, но Яндекс НЕ отдаёт "
-                                 "их через API. Используйте блок «Папки на компьютере» — инструкция там.")
-        else:
-            res["photounlim"] = "безлимитных фото не обнаружено"
         self.db.set("photounlim.method", method or "")
+        self.db.set("photounlim.size", res["photounlim_size"])
+        res["photounlim_rest"] = bool(method)
+        res["photounlim_report"] = report
         self.log(f"Проверка Яндекса: {res}")
         return res
+
+    def test_yandex_web(self):
+        w = self.yaweb()
+        try:
+            info = w.check()
+            msg = "Куки работают: список раздела «Фото» доступен" if info["has_files"] \
+                else "Куки работают, но раздел «Фото» пуст"
+            if info["has_files"]:
+                files, _, _ = w.list_page(UNLIM_ROOT, 0, 1)
+                if files:
+                    w.file_url(files[0]["path"])
+                    msg += ", ссылка на оригинал выдаётся"
+        except WebAuthError as e:
+            self.web_problem = str(e)
+            raise
+        self.web_problem = ""
+        self.log(f"Проверка кук Яндекса: {msg}")
+        return {"ok": True, "uid": info["uid"], "msg": msg}
 
     def test_google(self):
         d = DriveClient(self.google_auth(), db=self.db, log=self.log)
@@ -165,19 +226,15 @@ class Engine:
         self.log(f"Проверка Google: {res}")
         return res
 
-    # ================================================================== сканирование
-    def start_scan(self, fresh=False, only_local=False):
+    # ================================================================== список файлов
+    def start_scan(self, fresh=False):
         with self.lock:
             if self.scan_thread and self.scan_thread.is_alive():
                 return False
-            has_local = bool(local.parse_dirs(self.settings["local_dirs"]))
-            if only_local and not has_local:
-                raise ApiError("Не указаны папки на компьютере")
-            if not only_local and not self.settings["yandex_token"] and not has_local:
-                raise AuthError("Сначала укажите токен Яндекса (или папки на компьютере)")
+            if not self.settings["yandex_token"]:
+                raise AuthError("Сначала укажите токен Яндекса")
             self.stop_scan.clear()
-            target = self._scan_local_only if only_local else self._scan
-            self.scan_thread = threading.Thread(target=target, args=(fresh,), daemon=True, name="scan")
+            self.scan_thread = threading.Thread(target=self._scan, args=(fresh,), daemon=True, name="scan")
             self.scan_thread.start()
             return True
 
@@ -190,128 +247,51 @@ class Engine:
             db.set("scan.phase", "main")
             db.set("scan.offset", 0)
             db.set("scan.found", 0)
-            self.log(f"Сканирование Яндекс Диска №{scan_id} начато (режим: {s['scan_mode']})")
+            self.log(f"Получение списка файлов №{scan_id}")
         else:
             scan_id = int(db.get("scan.id", "1"))
-            self.log(f"Сканирование продолжено с места остановки (фаза {db.get('scan.phase')}, "
-                     f"смещение {db.get('scan.offset')})")
+            self.log(f"Получение списка продолжено с места остановки (этап {db.get('scan.phase')}, "
+                     f"позиция {db.get('scan.offset')})")
         db.set("scan.state", "running")
         db.set("scan.error", "")
         y = YandexClient(s["yandex_token"], stop_event=self.stop_scan, log=self.log)
-        has_ya = bool(s["yandex_token"])
         try:
-            if db.get("scan.phase") == "main" and not has_ya:
-                db.set("scan.phase", "local")
             if db.get("scan.phase") == "main":
                 if s["scan_mode"] == "tree":
                     self._scan_tree(y, "disk:/", scan_id)
                 else:
                     self._scan_flat(y, scan_id)
+                if self.stop_scan.is_set():
+                    raise Paused()
                 db.set("scan.phase", "photounlim")
                 db.set("scan.offset", 0)
             if db.get("scan.phase") == "photounlim":
                 if s["include_photounlim"]:
                     self._scan_photounlim(y, scan_id)
-                db.set("scan.phase", "local")
-                db.set("scan.offset", 0)
-            if db.get("scan.phase") == "local":
-                self._scan_local(scan_id)
+                if self.stop_scan.is_set():
+                    raise Paused()
                 db.set("scan.phase", "done")
-            if self.stop_scan.is_set():
-                raise Paused()
             db.set("scan.state", "done")
             st = db.stats()
             total = sum(v["count"] for v in st["by_status"].values())
-            self.log(f"Сканирование завершено. Всего файлов в базе: {total}")
+            self.log(f"Список получен. Всего файлов: {total} "
+                     f"({sum(v['bytes'] for v in st['by_status'].values()) / 2**30:.1f} ГБ)")
         except Paused:
             db.set("scan.state", "stopped")
-            self.log("Сканирование остановлено, его можно продолжить", "warn")
+            self.log("Получение списка остановлено, его можно продолжить", "warn")
         except Exception as e:  # noqa
             db.set("scan.state", "interrupted")
             db.set("scan.error", str(e))
-            self.log(f"Сканирование прервано ошибкой: {e}", "error")
+            if isinstance(e, WebAuthError):
+                self.web_problem = str(e)
+            self.log(f"Получение списка прервано ошибкой: {e}", "error")
             self.log(traceback.format_exc(), "debug")
 
-    def _scan_photounlim(self, y, scan_id):
-        """Раздел «Фото» (безлимитная автозагрузка). Официального метода нет — пробуем известные."""
-        method, report = y.probe_photounlim()
-        self.db.set("photounlim.method", method or "")
-        if method == "tree":
-            self._scan_tree(y, "photounlim:/", scan_id)
-            return
-        if method == "flat":
-            limit, offset = 1000, int(self.db.get("scan.offset", "0"))
-            while not self.stop_scan.is_set():
-                files, raw = y.photounlim_flat_page(offset, limit)
-                if files:
-                    self.db.upsert_files(files, scan_id)
-                    self._bump_found(len(files))
-                offset += raw
-                self.db.set("scan.offset", offset)
-                if raw < limit:
-                    return
-                self.log(f"Сканирование раздела «Фото»: получено {offset} записей…")
-            return
-        try:
-            size = int(y.disk_info().get("photounlim_size") or 0)
-        except ApiError:
-            size = 0
-        if size:
-            self.log(f"В разделе «Фото» (безлимитная автозагрузка) лежит {size / 2**30:.1f} ГБ, но Яндекс НЕ "
-                     f"отдаёт эти файлы через публичный API ({'; '.join(report)}). Перенесите их через блок "
-                     f"«Папки на компьютере»: программа «Яндекс Диск» для Windows умеет копировать их на ПК.",
-                     "warn")
-        else:
-            self.log("Безлимитных фото через API не найдено (" + "; ".join(report) + ")")
-
-    def _scan_local(self, scan_id):
-        dirs = local.parse_dirs(self.settings["local_dirs"])
-        if not dirs:
-            return
-        total, young = 0, 0
-        for d in dirs:
-            if not os.path.isdir(d):
-                self.log(f"Папка не найдена: {d}", "warn")
-                continue
-            for batch, y_cnt in local.scan_dir(d, self.settings["local_min_age_sec"], self.stop_scan):
-                if batch:
-                    self.db.upsert_files(batch, scan_id)
-                    self._bump_found(len(batch))
-                    total += len(batch)
-                young = y_cnt
-            self.log(f"Папка «{d}»: найдено файлов {total}")
-        if young:
-            self.log(f"Пропущено {young} файлов, которые менялись меньше "
-                     f"{self.settings['local_min_age_sec']} с назад (ещё скачиваются) — возьму при следующем проходе")
-
-    def check_local_dirs(self):
-        out = []
-        for d in local.parse_dirs(self.settings["local_dirs"]):
-            if not os.path.isdir(d):
-                out.append({"dir": d, "ok": False, "msg": "папка не найдена"})
-                continue
-            n = size = 0
-            for dirpath, _, files in os.walk(d):
-                for fn in files:
-                    try:
-                        size += os.path.getsize(os.path.join(dirpath, fn))
-                        n += 1
-                    except OSError:
-                        pass
-            out.append({"dir": d, "ok": True, "files": n, "bytes": size})
-        return {"dirs": out}
-
-    def _scan_local_only(self, fresh=False):
-        try:
-            self._scan_local(int(self.db.get("scan.id", "1")))
-        except Exception as e:  # noqa
-            self.log(f"Сканирование папок на компьютере: ошибка {e}", "error")
-
     def _bump_found(self, n):
-        found = int(self.db.get("scan.found", "0")) + n
-        self.db.set("scan.found", found)
+        self.db.set("scan.found", int(self.db.get("scan.found", "0")) + n)
 
     def _scan_flat(self, y, scan_id):
+        """«Файлы»: GET /v1/disk/resources/files — все файлы Диска одним плоским списком."""
         limit = 1000
         offset = int(self.db.get("scan.offset", "0"))
         while not self.stop_scan.is_set():
@@ -323,7 +303,7 @@ class Engine:
             self.db.set("scan.offset", offset)
             if raw < limit:
                 return
-            self.log(f"Сканирование: получено {offset} записей…")
+            self.log(f"Список «Файлы»: получено {offset}…")
 
     def _scan_tree(self, y, root, scan_id):
         stack, n = [root], 0
@@ -340,17 +320,65 @@ class Engine:
                 offset += raw
                 if raw == 0 or offset >= total:
                     break
-            self.log(f"Сканирование {root}: {path} — всего найдено {n}")
+            self.log(f"Обход {root}: {path} — найдено {n}")
+
+    def _scan_photounlim(self, y, scan_id):
+        """Раздел «Фото» (безлимит): плоский список через веб-API (mpfs/list) или REST."""
+        if self.settings["yandex_cookies"]:
+            w = YandexWeb(self.settings["yandex_cookies"], stop_event=self.stop_scan, log=self.log)
+            stack = [UNLIM_ROOT]
+            offset = int(self.db.get("scan.offset", "0"))
+            n = 0
+            while stack and not self.stop_scan.is_set():
+                path = stack.pop(0)
+                while not self.stop_scan.is_set():
+                    files, dirs, raw = w.list_page(path, offset, 1000)
+                    if files:
+                        self.db.upsert_files(files, scan_id)
+                        self._bump_found(len(files))
+                        n += len(files)
+                    stack.extend(dirs)
+                    offset += raw
+                    if path == UNLIM_ROOT:
+                        self.db.set("scan.offset", offset)
+                    if raw < 1000:
+                        break
+                    self.log(f"Список раздела «Фото»: получено {n}…")
+                offset = 0
+            self.web_problem = ""
+            self.log(f"Раздел «Фото»: в списке {n} файлов")
+            return
+        method, report = y.probe_photounlim()
+        self.db.set("photounlim.method", method or "")
+        if method == "tree":
+            self._scan_tree(y, "photounlim:/", scan_id)
+        elif method == "flat":
+            offset = int(self.db.get("scan.offset", "0"))
+            while not self.stop_scan.is_set():
+                files, raw = y.photounlim_flat_page(offset, 1000)
+                if files:
+                    self.db.upsert_files(files, scan_id)
+                    self._bump_found(len(files))
+                offset += raw
+                self.db.set("scan.offset", offset)
+                if raw < 1000:
+                    break
+        else:
+            size = int(self.db.get("photounlim.size") or 0)
+            if size:
+                self.log(f"Раздел «Фото» ({size / 2**30:.1f} ГБ) пропущен: официальный API Яндекса его не "
+                         f"отдаёт. Добавьте куки в блоке «Раздел «Фото»» и получите список ещё раз.", "warn")
 
     def stop_scanning(self):
         self.stop_scan.set()
+
+    def scanning(self):
+        return bool(self.scan_thread and self.scan_thread.is_alive())
 
     # ================================================================== перенос
     def start_transfer(self):
         with self.lock:
             if any(t.is_alive() for t in self.workers):
-                if self.transfer_state == "pausing":
-                    return False
                 return False
             s = self.settings
             if not s["yandex_token"]:
@@ -361,6 +389,7 @@ class Engine:
             self.transfer_state = "running"
             self.pause_reason = ""
             self.cooldown_until = 0
+            self.web_problem = ""
             self.db.set("transfer.wanted", 1)
             n = s["workers"]
             self.workers = [threading.Thread(target=self._worker, args=(i,), daemon=True, name=f"w{i}")
@@ -368,8 +397,6 @@ class Engine:
             for t in self.workers:
                 t.start()
             threading.Thread(target=self._supervise, daemon=True).start()
-            if self._watching_local():
-                threading.Thread(target=self._local_watcher, daemon=True).start()
             self.log(f"Перенос запущен, потоков: {n}")
             return True
 
@@ -377,7 +404,7 @@ class Engine:
         with self.lock:
             if by_user:
                 self.db.set("transfer.wanted", 0)
-            if self.transfer_state in ("running",):
+            if self.transfer_state == "running":
                 self.transfer_state = "pausing"
                 self.pause_reason = reason
                 self.stop_transfer.set()
@@ -395,23 +422,14 @@ class Engine:
                 self.transfer_state = "done"
                 st = self.db.stats()["by_status"]
                 self.db.set("transfer.wanted", 0)
-                self.log(f"Перенос завершён. Готово: {st.get('done', {}).get('count', 0)}, "
+                self.log(f"Перенос завершён. Перенесено и сверено: {st.get('done', {}).get('count', 0)}, "
                          f"ошибок: {st.get('error', {}).get('count', 0)}")
 
-    def _watching_local(self):
-        return bool(self.settings["local_watch"] and local.parse_dirs(self.settings["local_dirs"]))
-
-    def _local_watcher(self):
-        """Пока идёт перенос — периодически пересканирует папки (туда докачивает программа Яндекса)."""
-        while not self.stop_transfer.wait(max(1, self.settings["local_rescan_min"]) * 60):
-            if self._watching_local() and not self.scanning():
-                try:
-                    self.start_scan(only_local=True)
-                except Exception as e:  # noqa
-                    self.log(f"Пересканирование папок: {e}", "warn")
-
-    def scanning(self):
-        return bool(self.scan_thread and self.scan_thread.is_alive())
+    def _excluded_sources(self):
+        mode = self.photounlim_mode()
+        if mode == "" or (mode == "web" and self.web_problem):
+            return ("photounlim",)
+        return ()
 
     def _worker(self, wid):
         stop = self.stop_transfer
@@ -420,9 +438,11 @@ class Engine:
             if wait > 0:
                 stop.wait(min(wait, 5))
                 continue
-            row = self.db.claim_next()
+            excluded = self._excluded_sources()
+            row = self.db.claim_next(excluded)
             if row is None:
-                if self.scanning() or self.db.has_waiting_retries() or self._watching_local():
+                # Ждём, пока идёт получение списка или есть отложенные файлы (молчащие серверы Яндекса)
+                if self.scanning() or self.db.has_waiting(excluded):
                     stop.wait(3)
                     continue
                 return
@@ -430,6 +450,16 @@ class Engine:
                 self._transfer_file(wid, row)
             except Paused:
                 self.db.update_file(row["id"], status="pending")
+            except StorageDown as e:
+                self.db.update_file(row["id"], status="pending", next_try=time.time() + DEFER_SEC,
+                                    last_error=str(e), note="ждёт сервер Яндекса")
+                self.log(f"«{row['name']}»: {e}", "warn")
+            except WebAuthError as e:
+                self.db.update_file(row["id"], status="pending", last_error=str(e))
+                if not self.web_problem:
+                    self.web_problem = str(e)
+                    self.log(f"Раздел «Фото» приостановлен: {e}. Остальные файлы продолжают переноситься.",
+                             "error")
             except (AuthError, FatalPause) as e:
                 self.db.update_file(row["id"], status="pending", last_error=str(e))
                 self.pause_transfer(str(e), by_user=False)
@@ -458,7 +488,7 @@ class Engine:
             delay = min(3600, 30 * (2 ** (self.rate_hits - 1)))
             self.cooldown_until = max(self.cooldown_until, time.time() + delay)
             extra = ""
-            if delay >= 900:
+            if delay >= 900 and "Google" in str(e):
                 extra = (" Похоже на суточный лимит Google (≈750 ГБ загрузки в сутки на аккаунт) — "
                          "программа сама продолжит позже.")
             self.log(f"{e}. Общая пауза {delay // 60} мин {delay % 60} с.{extra}", "warn")
@@ -469,6 +499,7 @@ class Engine:
             self.speed.append((now, n))
             while self.speed and self.speed[0][0] < now - 60:
                 self.speed.popleft()
+            self.rate_hits = 0
 
     def speed_bps(self):
         now = time.time()
@@ -476,48 +507,109 @@ class Engine:
             items = [x for x in self.speed if x[0] >= now - 30]
         if not items:
             return 0
-        span = max(5.0, now - items[0][0])
-        return sum(n for _, n in items) / span
+        return sum(n for _, n in items) / max(5.0, now - items[0][0])
+
+    # ---------------------------------------------------------------- один файл
+    def _open_source(self, row, offset, y, w):
+        if row["source"] == "photounlim" and self.photounlim_mode() == "web":
+            return open_download(w.file_url(row["path"]), offset, sess=w.session(), reject_pages=True)
+        return y.open_stream(row["path"], offset)
+
+    def _find_existing(self, drive, parent, row, fresh=False):
+        """Файл с тем же именем, размером и MD5 уже лежит в папке → его id."""
+        if fresh:
+            self.folder_index.drop(parent)
+        for fid, md5, size in self.folder_index.get(drive, parent).get(row["name"], []):
+            if size == row["size"] and (not row["md5"] or md5 == row["md5"]):
+                return fid
+        return None
 
     def _transfer_file(self, wid, row):
         s = self.settings
-        stop = self.stop_transfer
         size = row["size"]
         info = {"id": row["id"], "path": row["path"], "size": size, "done": row["bytes_done"],
                 "stage": "подготовка", "started": time.time()}
         self.active[wid] = info
-        drive = self.drive(stop)
-        y = self.yandex(stop)
+        drive = self.drive(self.stop_transfer)
+        y = self.yandex(self.stop_transfer)
+        w = self.yaweb(self.stop_transfer) if row["source"] == "photounlim" else None
 
         parent = drive.ensure_folder(drive_dir_for(row, s), s["drive_root"])
         props = {APP_PROP: "1"}
         if row["md5"]:
             props["ya_md5"] = row["md5"]
-        uri = row["upload_uri"]
 
-        if not uri:
-            if s["skip_existing"]:
-                info["stage"] = "проверка наличия на Drive"
-                for f in drive.find_in_parent(parent, row["name"]):
-                    if int(f.get("size") or -1) != size:
-                        continue
-                    if row["source"] == "local" and not row["md5"]:
-                        row["md5"] = local.file_md5(row["path"])
-                        self.db.update_file(row["id"], md5=row["md5"])
-                    if not row["md5"] or f.get("md5Checksum") == row["md5"]:
-                        self.db.update_file(row["id"], status="done", gd_id=f["id"], bytes_done=size,
-                                            last_error=None, note="уже был на Drive")
-                        self._maybe_delete_local(row)
-                        return
-            if size == 0:
-                f = drive.create_empty(row["name"], parent, row["mime"], props, row["modified"])
-                self._finish(row, f, drive)
+        if not row["upload_uri"] and s["skip_existing"]:
+            info["stage"] = "проверка дублей"
+            fid = self._find_existing(drive, parent, row, fresh=row["attempts"] > 0)
+            if fid:
+                self.db.update_file(row["id"], status="done", gd_id=fid, bytes_done=size,
+                                    last_error=None, note="уже был на Drive",
+                                    verified=time.time() if row["md5"] else None)
                 return
-            uri = drive.start_upload(row["name"], parent, size, row["mime"], props, row["modified"])
-            self.db.update_file(row["id"], upload_uri=uri, bytes_done=0)
 
         chunk = s["chunk_mb"] * 1024 * 1024
-        offset = None          # сколько байт подтвердил Google (None — неизвестно, спросить)
+        if size <= chunk and not row["upload_uri"]:
+            self._transfer_small(row, info, drive, parent, props, y, w)
+        else:
+            self._transfer_large(row, info, drive, parent, props, y, w, chunk)
+
+    def _transfer_small(self, row, info, drive, parent, props, y, w):
+        """Файл до размера куска: скачать в память, сверить MD5 с Яндексом, залить одним запросом."""
+        size = row["size"]
+        stop = self.stop_transfer
+        for attempt in range(6):
+            if stop.is_set():
+                raise Paused()
+            try:
+                data = b""
+                if size:
+                    info["stage"] = "скачивание с Яндекса"
+                    stream, _ = self._open_source(row, 0, y, w)
+                    try:
+                        data = read_exact(stream.raw, size, lambda n: info.__setitem__("done", n // 2))
+                        extra = stream.raw.read(1)
+                    finally:
+                        stream.close()
+                    if len(data) != size or extra:
+                        raise ApiError(f"Яндекс отдал {len(data)}{'+' if extra else ''} байт вместо {size}",
+                                       retryable=True)
+                    if row["md5"] and hashlib.md5(data).hexdigest() != row["md5"]:
+                        raise ApiError("MD5 скачанного не совпал с Яндексом — скачиваю заново", retryable=True)
+                info["stage"] = "загрузка в Google"
+                info["done"] = size // 2
+                f = drive.upload_small(row["name"], parent, data, row["mime"], props, row["modified"])
+                self._add_speed(size)
+                self._finish(row, f, drive, parent)
+                return
+            except STOP_ERRORS:
+                raise
+            except (ApiError, *NETWORK_ERRORS) as e:
+                if isinstance(e, ApiError) and not e.retryable:
+                    raise
+                # Ответ Google мог потеряться уже после создания файла — проверяем, чтобы не было дубля
+                if info["stage"] == "загрузка в Google":
+                    fid = self._find_existing(drive, parent, row, fresh=True)
+                    if fid:
+                        self.db.update_file(row["id"], status="done", gd_id=fid, bytes_done=size,
+                                            last_error=None, note=None,
+                                            verified=time.time() if row["md5"] else None)
+                        return
+                delay = backoff(attempt, base=3, cap=60)
+                self.log(f"Сбой «{row['name']}»: {e} — повтор через {delay:.0f} c", "warn")
+                if stop.wait(delay):
+                    raise Paused()
+        raise ApiError(f"«{row['name']}»: не удалось после нескольких попыток")
+
+    def _transfer_large(self, row, info, drive, parent, props, y, w, chunk):
+        """Большой файл: резюмируемая загрузка кусками; после сбоя — с подтверждённого Google байта."""
+        size = row["size"]
+        stop = self.stop_transfer
+        uri = row["upload_uri"]
+        if not uri:
+            uri = drive.start_upload(row["name"], parent, size, row["mime"], props, row["modified"])
+            self.db.update_file(row["id"], upload_uri=uri, bytes_done=0)
+        offset = None
         stream = None
         errors = 0
         try:
@@ -529,7 +621,7 @@ class Engine:
                         info["stage"] = "сверка с Google"
                         st, val = drive.upload_status(uri, size)
                         if st == "done":
-                            self._finish(row, val, drive)
+                            self._finish(row, val, drive, parent)
                             return
                         if st == "gone":
                             self.log(f"Сессия загрузки истекла, начинаю файл заново: {row['path']}", "warn")
@@ -546,10 +638,7 @@ class Engine:
                             stream = None
                     if stream is None:
                         info["stage"] = "открываю Яндекс"
-                        if row["source"] == "local":
-                            stream, pos = local.open_stream(row["path"], offset)
-                        else:
-                            stream, pos = y.open_stream(row["path"], offset)
+                        stream, pos = self._open_source(row, offset, y, w)
                         if pos < offset:
                             skipped = read_exact(stream.raw, offset - pos)
                             if len(skipped) != offset - pos:
@@ -557,32 +646,27 @@ class Engine:
                     want = min(chunk, size - offset)
                     info["stage"] = "передача"
                     base = offset
-                    buf = read_exact(stream.raw, want,
-                                     lambda n: info.__setitem__("done", base + n))
+                    buf = read_exact(stream.raw, want, lambda n: info.__setitem__("done", base + n))
                     if len(buf) != want:
                         raise ApiError(f"Яндекс оборвал поток ({len(buf)} из {want} байт)", retryable=True)
                     st, val = drive.put_chunk(uri, buf, offset, size)
                     if st == "done":
                         self._add_speed(len(buf))
-                        self._finish(row, val, drive)
+                        self._finish(row, val, drive, parent)
                         return
                     if st == "gone":
                         offset = None
                         continue
-                    accepted = val - offset
-                    if accepted > 0:
-                        self._add_speed(accepted)
+                    if val - offset > 0:
+                        self._add_speed(val - offset)
                     if val != offset + len(buf):
-                        # Google принял меньше, чем отправили — перечитываем с нужного места
                         stream.close()
                         stream = None
                     offset = val
                     info["done"] = offset
                     self.db.update_file(row["id"], bytes_done=offset)
                     errors = 0
-                    with self.lock:
-                        self.rate_hits = 0
-                except (AuthError, FatalPause, RateLimited, Paused):
+                except STOP_ERRORS:
                     raise
                 except (ApiError, *NETWORK_ERRORS) as e:
                     if isinstance(e, ApiError) and not e.retryable:
@@ -603,22 +687,10 @@ class Engine:
             if stream is not None:
                 stream.close()
 
-    def _maybe_delete_local(self, row):
-        if row["source"] != "local" or not self.settings["local_delete_after"] or not row["md5"]:
-            return
-        try:
-            os.remove(row["path"][len(local.PREFIX):])
-            self.db.update_file(row["id"], note="загружен и сверен, копия на компьютере удалена")
-        except OSError as e:
-            self.log(f"Не удалось удалить локальную копию {row['path']}: {e}", "warn")
-
-    def _finish(self, row, f, drive):
-        s = self.settings
+    def _finish(self, row, f, drive, parent):
+        """Файл принят Google: сверяем MD5 и размер с Яндексом. Только после этого — «Готово»."""
         gmd5 = f.get("md5Checksum")
-        if row["source"] == "local":
-            row["md5"] = local.file_md5(row["path"])   # MD5 считаем по локальному файлу
-            self.db.update_file(row["id"], md5=row["md5"])
-        if s["verify_md5"] and row["md5"] and gmd5 and gmd5 != row["md5"]:
+        if self.settings["verify_md5"] and row["md5"] and gmd5 and gmd5 != row["md5"]:
             drive.delete(f["id"])
             self.db.update_file(row["id"], upload_uri=None, bytes_done=0)
             raise ApiError(f"MD5 не совпал (Яндекс {row['md5']}, Google {gmd5}) — файл удалён с Drive, "
@@ -627,14 +699,14 @@ class Engine:
             drive.delete(f["id"])
             self.db.update_file(row["id"], upload_uri=None, bytes_done=0)
             raise ApiError("Размер на Drive не совпал — файл будет загружен заново", retryable=True)
+        self.folder_index.add(parent, row["name"], f["id"], gmd5, row["size"])
         self.db.update_file(row["id"], status="done", gd_id=f["id"], upload_uri=None,
-                            bytes_done=row["size"], last_error=None, note=None)
-        if gmd5 and row["md5"] == gmd5:
-            self._maybe_delete_local(row)
+                            bytes_done=row["size"], last_error=None, note=None,
+                            verified=time.time() if (gmd5 and gmd5 == row["md5"]) else None)
 
     # ================================================================== служебные операции
     def busy(self):
-        return any(t.is_alive() for t in self.workers) or (self.task_thread and self.task_thread.is_alive())
+        return any(t.is_alive() for t in self.workers) or bool(self.task_thread and self.task_thread.is_alive())
 
     def run_task(self, name, fn):
         with self.lock:
@@ -654,43 +726,75 @@ class Engine:
             self.task_thread.start()
 
     def verify_drive(self):
-        """Сверка с Drive: файлы, удалённые/убранные в корзину на Drive, снова ставятся в очередь."""
+        """Полная сверка: каждый «готовый» файл существует на Drive, не в корзине, и его размер
+        и MD5 совпадают с Яндексом. Иначе — снова в очередь."""
         def fn():
-            self.task["msg"] = "получаю список файлов на Google Drive…"
-            ids = self.drive().list_app_file_ids()
+            self.task["msg"] = "получаю с Google Drive список файлов с контрольными суммами…"
+            files = self.drive().list_app_files()
             self.db.folders_clear()
-            rows = self.db.q("SELECT id, gd_id FROM files WHERE status='done'")
-            missing = [r["id"] for r in rows if r["gd_id"] not in ids]
-            for fid in missing:
-                self.db.update_file(fid, status="pending", gd_id=None, upload_uri=None, bytes_done=0,
-                                    attempts=0, next_try=0, note="не найден на Drive — повторно")
-            return f"на Drive {len(ids)} файлов программы; перенесённых по базе {len(rows)}; " \
-                   f"возвращено в очередь {len(missing)}"
+            self.folder_index.clear()
+            rows = self.db.q("SELECT id, gd_id, size, md5 FROM files WHERE status='done'")
+            ok = missing = bad = 0
+            now = time.time()
+            for r in rows:
+                f = files.get(r["gd_id"])
+                if f is None:
+                    missing += 1
+                    self.db.update_file(r["id"], status="pending", gd_id=None, upload_uri=None, bytes_done=0,
+                                        attempts=0, next_try=0, verified=None, note="не найден на Drive — повторно")
+                elif int(f.get("size") or -1) != r["size"] or (r["md5"] and f.get("md5Checksum") != r["md5"]):
+                    bad += 1
+                    self.db.update_file(r["id"], status="pending", gd_id=None, upload_uri=None, bytes_done=0,
+                                        attempts=0, next_try=0, verified=None,
+                                        note="на Drive не совпал размер/MD5 — повторно")
+                else:
+                    ok += 1
+                    self.db.update_file(r["id"], verified=now)
+            return (f"сверено {len(rows)}: совпало по размеру и MD5 — {ok}, нет на Drive — {missing}, "
+                    f"не совпало — {bad}. Несовпавшие и пропавшие возвращены в очередь")
         self.run_task("Сверка с Google Drive", fn)
+
+    def report_csv(self):
+        out = io.StringIO()
+        wr = csv.writer(out, delimiter=";")
+        wr.writerow(["Путь на Яндексе", "Размер, байт", "MD5 Яндекса", "Статус", "Проверено (MD5 совпал)",
+                     "ID на Google Drive", "Ссылка", "Ошибка/примечание"])
+        for r in self.db.q("SELECT path,size,md5,status,verified,gd_id,last_error,note FROM files ORDER BY path"):
+            wr.writerow([r["path"], r["size"], r["md5"] or "", r["status"],
+                         time.strftime("%Y-%m-%d %H:%M", time.localtime(r["verified"])) if r["verified"] else "",
+                         r["gd_id"] or "",
+                         f"https://drive.google.com/file/d/{r['gd_id']}/view" if r["gd_id"] else "",
+                         r["last_error"] or r["note"] or ""])
+        return "﻿" + out.getvalue()      # BOM — чтобы Excel открыл кириллицу
 
     def retry_errors(self):
         n = self.db.x("UPDATE files SET status='pending', attempts=0, next_try=0 WHERE status='error'")
-        self.log(f"В очередь возвращено файлов с ошибками: {n}")
-        return n
+        n2 = self.db.x("UPDATE files SET next_try=0 WHERE status='pending' AND next_try>?", (time.time(),))
+        DEAD.clear()
+        self.web_problem = ""
+        self.log(f"В очередь возвращено: с ошибками {n}, отложенных {n2}")
+        return n + n2
 
     def requeue_all(self):
         if self.busy():
             raise ApiError("Сначала остановите перенос")
         n = self.db.x("UPDATE files SET status='pending', attempts=0, next_try=0, gd_id=NULL, "
-                      "upload_uri=NULL, bytes_done=0, last_error=NULL, note=NULL")
+                      "upload_uri=NULL, bytes_done=0, last_error=NULL, note=NULL, verified=NULL")
         self.db.folders_clear()
+        self.folder_index.clear()
         self.log(f"Все файлы ({n}) поставлены в очередь заново. Уже лежащие на Drive одинаковые файлы "
-                 f"будут пропущены, если включено «Не заливать повторно».")
+                 f"будут пропущены (сверка по имени, размеру и MD5).")
         return n
 
     def reset_db(self):
         if self.busy() or self.scanning():
-            raise ApiError("Сначала остановите перенос и сканирование")
+            raise ApiError("Сначала остановите перенос и получение списка")
         self.db.x("DELETE FROM files")
         self.db.folders_clear()
+        self.folder_index.clear()
         for k in ("scan.state", "scan.phase", "scan.offset", "scan.found", "scan.error"):
             self.db.set(k, None)
-        self.log("База очищена. Нужно заново просканировать Яндекс Диск.")
+        self.log("База очищена. Нужно заново получить список файлов.")
 
     def file_action(self, fid, action):
         if action == "retry":
@@ -700,7 +804,7 @@ class Engine:
                       "WHERE id=? AND status!='active'", (fid,))
         elif action == "requeue":
             self.db.x("UPDATE files SET status='pending', attempts=0, next_try=0, gd_id=NULL, "
-                      "upload_uri=NULL, bytes_done=0 WHERE id=? AND status!='active'", (fid,))
+                      "upload_uri=NULL, bytes_done=0, verified=NULL WHERE id=? AND status!='active'", (fid,))
 
     # ================================================================== статус для UI
     def status(self):
@@ -724,9 +828,11 @@ class Engine:
             "eta": (left / sp) if sp > 0 else None,
             "task": self.task,
             "configured": {"yandex": bool(self.settings["yandex_token"]),
+                           "cookies": bool(self.settings["yandex_cookies"]),
                            "google": bool(self.settings["google_refresh_token"]),
                            "google_client": bool(self.settings["google_client_id"])},
             "google_email": self.settings["google_email"],
-            "photounlim_method": db.get("photounlim.method"),
-            "watching_local": self._watching_local(),
+            "photounlim": {"mode": self.photounlim_mode(), "problem": self.web_problem,
+                           "size": int(db.get("photounlim.size") or 0)},
+            "dead_hosts": DEAD.active(),
         }

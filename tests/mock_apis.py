@@ -41,8 +41,10 @@ class State:
         self.ya = make_files()
         self.drive = {}       # id -> {name, parents, mimeType, data, appProperties, trashed}
         self.sessions = {}    # sid -> {meta, size, data}
-        self.faults = {"ya_drop": 0.0, "g_500": 0.0, "slow": 0.0, "pu_hidden": False}
-        self.calls = {"chunks": 0}
+        self.faults = {"ya_drop": 0.0, "g_500": 0.0, "slow": 0.0, "pu_hidden": False,
+                       "dead": [],          # пути файлов, чей сервер хранения «молчит»
+                       "web_session": "good-session"}
+        self.calls = {"chunks": 0, "mpfs_url": 0, "small_uploads": 0}
 
 
 S = State()
@@ -123,7 +125,22 @@ class H(BaseHTTPRequestHandler):
                                                 + urllib.parse.urlencode({"p": path})})
         return self.send_json(404, {"error": "nf"})
 
+    def downloader(self, qs):
+        """Как downloader.disk.yandex.ru: редирект на сервер хранения."""
+        port = self.server.server_address[1]
+        p = qs["p"]
+        host = "localhost" if p in S.faults["dead"] else "127.0.0.1"   # «молчащий» сервер — другой хост
+        self.send_response(302)
+        self.send_header("Location", f"http://{host}:{port}/st?" + urllib.parse.urlencode({"p": p}))
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def dl(self, qs):
+        if qs["p"] in S.faults["dead"]:
+            import time
+            time.sleep(3)          # сервер не отвечает (таймаут клиента меньше)
+            self.close_connection = True
+            return
         data = S.ya.get(qs["p"])
         if data is None:
             self.send_response(404)
@@ -151,6 +168,64 @@ class H(BaseHTTPRequestHandler):
             if S.faults["slow"]:
                 import time
                 time.sleep(S.faults["slow"])
+
+    # ------------------------------------------------------------------ Яндекс, веб-версия
+    def web_ok(self):
+        c = self.headers.get("Cookie") or ""
+        need = {"Session_id": S.faults["web_session"], "sessionid2": "x", "yandexuid": "1"}
+        got = dict(p.strip().split("=", 1) for p in c.split(";") if "=" in p)
+        return all(got.get(k) == v for k, v in need.items())
+
+    def web(self, method, u, qs):
+        if u.path.startswith("/passport."):
+            b = b"<html>login</html>"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
+            return
+        if u.path == "/web/client/disk":
+            if not self.web_ok():
+                self.send_response(302)
+                self.send_header("Location", "/passport.yandex/auth")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            b = b'<html><script>var x={"sk":"sk-123","uid":"777"};</script></html>'
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
+            return
+        if u.path == "/web/models-v2":
+            body = json.loads(self.body() or b"{}")
+            if not self.web_ok() or body.get("sk") != "sk-123":
+                return self.send_json(401, {"error": "unauthorized"})
+            m = qs.get("m")
+            rp = body.get("requestParams") or {}
+            if m == "mpfs/list":
+                root = rp["path"].rstrip("/")
+                items = []
+                for p, d in sorted(S.ya.items()):
+                    if p.startswith("photounlim:/"):
+                        name = p.split(":/", 1)[1]
+                        items.append({"path": "/photounlim/" + name, "name": name, "type": "file",
+                                      "ctime": 1556964000, "mtime": 1556964000,
+                                      "meta": {"size": len(d), "md5": md5(d), "mimetype": "image/jpeg",
+                                               "mediatype": "image"}})
+                off, amount = int(rp.get("offset", 0)), int(rp.get("amount", 40))
+                return self.send_json(200, [{"path": root, "type": "dir"}] + items[off:off + amount])
+            if m == "mpfs/url":
+                p = rp["path"]
+                yp = "photounlim:/" + p[len("/photounlim/"):]
+                if yp not in S.ya:
+                    return self.send_json(200, {"error": {"id": "resource not found"}})
+                S.calls["mpfs_url"] += 1
+                return self.send_json(200, {"file": f"http://127.0.0.1:{self.server.server_address[1]}/dl?"
+                                                    + urllib.parse.urlencode({"p": yp})})
+            return self.send_json(200, {"error": {"id": "unknown method"}})
+        return self.send_json(404, {})
 
     # ------------------------------------------------------------------ Google
     def g_auth_ok(self):
@@ -202,7 +277,7 @@ class H(BaseHTTPRequestHandler):
             return self.send_json(400, {"error": "invalid_grant"})
         if not self.g_auth_ok():
             return self.send_json(401, {"error": {"code": 401, "message": "Invalid Credentials"}})
-        if random.random() < S.faults["g_500"] and u.path.startswith("/g/upload/session"):
+        if random.random() < S.faults["g_500"] and u.path.startswith("/g/upload/"):
             self.body()
             return self.send_json(503, {"error": {"code": 503, "message": "backend"}})
         with S.lock:
@@ -227,6 +302,18 @@ class H(BaseHTTPRequestHandler):
                     self.send_header("Content-Length", "0")
                     self.end_headers()
                     return
+                return self.send_json(200, self.g_file(fid))
+            if p == "/g/upload/drive/v3/files" and method == "POST" and qs.get("uploadType") == "multipart":
+                raw = self.body()
+                bnd = re.search(r"boundary=(\S+)", self.headers["Content-Type"]).group(1).encode()
+                parts = raw.split(b"--" + bnd)
+                meta = json.loads(parts[1].split(b"\r\n\r\n", 1)[1].rsplit(b"\r\n", 1)[0])
+                data = parts[2].split(b"\r\n\r\n", 1)[1][:-2]
+                fid = self.new_file(meta, data)
+                S.calls["small_uploads"] += 1
+                if random.random() < S.faults.get("g_lost", 0):
+                    # файл создан, но ответ «потерялся» — клиент не должен залить дубль
+                    return self.send_json(503, {"error": {"code": 503, "message": "lost"}})
                 return self.send_json(200, self.g_file(fid))
             if p == "/g/upload/drive/v3/files" and method == "POST":
                 meta = json.loads(self.body() or b"{}")
@@ -292,7 +379,11 @@ class H(BaseHTTPRequestHandler):
         if u.path.startswith("/ya/"):
             return self.ya(u, qs)
         if u.path == "/dl":
+            return self.downloader(qs)
+        if u.path == "/st":
             return self.dl(qs)
+        if u.path.startswith("/web/") or u.path.startswith("/passport."):
+            return self.web(method, u, qs)
         if u.path.startswith("/g/"):
             return self.do_google(method, u, qs)
         self.send_json(404, {})
@@ -319,7 +410,8 @@ def start(port=0):
 
 def env_for(port):
     b = f"http://127.0.0.1:{port}"
-    return {"YA2GD_YANDEX_API": b + "/ya/v1/disk", "YA2GD_GOOGLE_TOKEN": b + "/g/token",
+    return {"YA2GD_YANDEX_API": b + "/ya/v1/disk", "YA2GD_YANDEX_WEB": b + "/web",
+            "YA2GD_STORAGE_TIMEOUT": "1", "YA2GD_DEAD_HOST_TTL": "4", "YA2GD_GOOGLE_TOKEN": b + "/g/token",
             "YA2GD_GOOGLE_AUTH": b + "/g/auth", "YA2GD_GOOGLE_API": b + "/g/drive/v3",
             "YA2GD_GOOGLE_UPLOAD": b + "/g/upload/drive/v3"}
 

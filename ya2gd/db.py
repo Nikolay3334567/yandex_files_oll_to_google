@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS files (
     upload_uri    TEXT,
     bytes_done    INTEGER NOT NULL DEFAULT 0,
     note          TEXT,                      -- например «уже был на Drive»
+    verified      REAL,                      -- когда подтверждено: на Drive тот же размер и MD5
     seen_scan     INTEGER NOT NULL DEFAULT 0,
     updated       REAL NOT NULL DEFAULT 0
 );
@@ -58,6 +59,9 @@ class DB:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(SCHEMA)
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(files)")}
+        if "verified" not in cols:
+            self.conn.execute("ALTER TABLE files ADD COLUMN verified REAL")
 
     # ---------- низкоуровневое ----------
     def q(self, sql, args=()):
@@ -117,20 +121,28 @@ class DB:
                 self.conn.execute("ROLLBACK")
                 raise
 
-    def claim_next(self):
-        """Атомарно забирает следующий файл в работу."""
+    @staticmethod
+    def _excl(excluded):
+        if not excluded:
+            return "", []
+        return f" AND source NOT IN ({','.join('?' * len(excluded))})", list(excluded)
+
+    def claim_next(self, excluded=()):
+        """Атомарно забирает следующий файл в работу (сначала недокачанные большие)."""
         now = time.time()
+        ex, args = self._excl(excluded)
         with self._lock:
             row = self.conn.execute(
-                "SELECT * FROM files WHERE status='pending' AND next_try<=? "
-                "ORDER BY (upload_uri IS NULL), id LIMIT 1", (now,)).fetchone()
+                f"SELECT * FROM files WHERE status='pending' AND next_try<=?{ex} "
+                "ORDER BY (upload_uri IS NULL), id LIMIT 1", [now] + args).fetchone()
             if row is None:
                 return None
             self.conn.execute("UPDATE files SET status='active', updated=? WHERE id=?", (now, row["id"]))
             return dict(row)
 
-    def has_waiting_retries(self):
-        return self.q1("SELECT 1 FROM files WHERE status='pending' LIMIT 1") is not None
+    def has_waiting(self, excluded=()):
+        ex, args = self._excl(excluded)
+        return self.q1(f"SELECT 1 FROM files WHERE status='pending'{ex} LIMIT 1", args) is not None
 
     def update_file(self, fid, **kw):
         kw["updated"] = time.time()
@@ -146,12 +158,19 @@ class DB:
         out = {r["status"]: {"count": r["n"], "bytes": r["s"]} for r in rows}
         partial = self.q1("SELECT IFNULL(SUM(bytes_done),0) FROM files WHERE status IN ('pending','active')")[0]
         src = self.q("SELECT source, COUNT(*) n, IFNULL(SUM(size),0) s FROM files GROUP BY source")
-        return {"by_status": out, "partial_bytes": partial,
+        w = self.q1("SELECT COUNT(*), IFNULL(SUM(size),0) FROM files WHERE status='pending' AND next_try>?",
+                    (time.time(),))
+        ver = self.q1("SELECT COUNT(*) FROM files WHERE status='done' AND verified IS NOT NULL")[0]
+        return {"by_status": out, "partial_bytes": partial, "waiting": {"count": w[0], "bytes": w[1]},
+                "verified": ver,
                 "by_source": {r["source"]: {"count": r["n"], "bytes": r["s"]} for r in src}}
 
     def list_files(self, status=None, query=None, offset=0, limit=100):
         where, args = [], []
-        if status:
+        if status == "waiting":
+            where.append("status='pending' AND next_try>?")
+            args.append(time.time())
+        elif status:
             where.append("status=?")
             args.append(status)
         if query:
@@ -159,7 +178,8 @@ class DB:
             args.append(f"%{query}%")
         w = ("WHERE " + " AND ".join(where)) if where else ""
         total = self.q1(f"SELECT COUNT(*) FROM files {w}", args)[0]
-        rows = self.q(f"SELECT id,path,size,status,attempts,last_error,bytes_done,gd_id,note,updated "
+        rows = self.q(f"SELECT id,path,size,status,attempts,last_error,bytes_done,gd_id,note,updated,"
+                      f"verified,next_try "
                       f"FROM files {w} ORDER BY updated DESC, id LIMIT ? OFFSET ?",
                       args + [limit, offset])
         return total, [dict(r) for r in rows]

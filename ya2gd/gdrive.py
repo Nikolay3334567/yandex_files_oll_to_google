@@ -6,6 +6,7 @@ POST .../upload/drive/v3/files?uploadType=resumable → URI сессии (жив
 сколько байт он уже принял (PUT с "bytes */total"), и продолжить с этого места.
 """
 import json
+import os
 import threading
 import time
 import urllib.parse
@@ -124,6 +125,8 @@ class DriveClient:
                 err = classify(r)
                 if r.status_code == 401 and attempt == 0:
                     self.auth.invalidate()
+                    if tries == 1:
+                        raise ApiError("Google: токен устарел, обновляю", status=401, retryable=True)
                     continue
                 if not err.retryable:
                     raise err
@@ -211,20 +214,44 @@ class DriveClient:
             if e.status != 404:
                 raise
 
-    def list_app_file_ids(self):
-        """Все неудалённые файлы (не папки), созданные этой программой."""
-        ids, token = set(), None
+    def _list_all(self, q, fields):
+        token = None
         while True:
-            params = {"q": f"trashed = false and mimeType != '{FOLDER_MIME}' and "
-                           f"appProperties has {{ key='{APP_PROP}' and value='1' }}",
-                      "fields": "nextPageToken,files(id)", "pageSize": 1000, "spaces": "drive"}
+            params = {"q": q, "fields": f"nextPageToken,files({fields})", "pageSize": 1000, "spaces": "drive"}
             if token:
                 params["pageToken"] = token
             d = self._req("GET", f"{API}/files", params=params).json()
-            ids.update(f["id"] for f in d.get("files", []))
+            yield from d.get("files", [])
             token = d.get("nextPageToken")
             if not token:
-                return ids
+                return
+
+    def list_app_files(self):
+        """Все неудалённые файлы (не папки), созданные программой: id → {size, md5Checksum}."""
+        q = (f"trashed = false and mimeType != '{FOLDER_MIME}' and "
+             f"appProperties has {{ key='{APP_PROP}' and value='1' }}")
+        return {f["id"]: f for f in self._list_all(q, "id,size,md5Checksum")}
+
+    def list_children(self, parent_id):
+        """Файлы (не папки) в папке — для проверки дублей."""
+        q = f"'{parent_id}' in parents and trashed = false and mimeType != '{FOLDER_MIME}'"
+        return list(self._list_all(q, "id,name,md5Checksum,size"))
+
+    def upload_small(self, name, parent_id, data, mime, props, modified=None):
+        """Загрузка одним запросом (multipart). Без внутренних повторов: при сбое вызывающий
+        сначала проверяет, не создался ли файл, — иначе возможен дубль."""
+        meta = {"name": name, "parents": [parent_id], "appProperties": props}
+        if modified:
+            meta["modifiedTime"] = modified
+        boundary = "ya2gd" + os.urandom(12).hex()
+        body = (f"--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n".encode()
+                + json.dumps(meta).encode("utf-8")
+                + f"\r\n--{boundary}\r\nContent-Type: {mime or 'application/octet-stream'}\r\n\r\n".encode()
+                + data + f"\r\n--{boundary}--\r\n".encode())
+        r = self._req("POST", f"{UPLOAD}/files", tries=1,
+                      params={"uploadType": "multipart", "fields": "id,md5Checksum,size"},
+                      headers={"Content-Type": f"multipart/related; boundary={boundary}"}, data=body)
+        return r.json()
 
     # ------------------------------------------------------------------ резюмируемая загрузка
     def start_upload(self, name, parent_id, size, mime, props, modified=None):

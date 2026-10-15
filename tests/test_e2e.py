@@ -150,7 +150,7 @@ def main():
         app.post("/api/actions/verify_drive")
         wait_for(lambda: app.get("/api/status")["task"]["state"] == "done", 60, "verify")
         msg = app.get("/api/status")["task"]["msg"]
-        assert "возвращено в очередь 1" in msg, msg
+        assert "нет на Drive — 1" in msg and "совпало по размеру и MD5 — 33" in msg, msg
         app.post("/api/transfer/start")
         wait_for(lambda: app.get("/api/status")["transfer"]["state"] == "done", 120, "transfer 2")
         check(app, M)
@@ -164,8 +164,7 @@ def main():
         notes = app.get("/api/files?status=done&limit=500")["items"]
         assert all(n["note"] == "уже был на Drive" for n in notes), notes[:3]
         print("OK повторный полный прогон: дублей нет, всё распознано как уже загруженное")
-        local_folder_test(app, M, ddir)
-        print("\nВСЕ ПРОВЕРКИ ПРОЙДЕНЫ")
+        print("\nСЦЕНАРИЙ 1 ПРОЙДЕН")
     except Exception:
         print("---- журнал программы ----")
         print(open(os.path.join(ddir, "out.txt")).read()[-6000:])
@@ -179,55 +178,85 @@ def main():
         shutil.rmtree(ddir, ignore_errors=True)
 
 
-def local_folder_test(app, M, ddir):
-    """Раздел «Фото» не отдаётся API → берём файлы из папки, куда их скачала программа Яндекса."""
-    http("POST", M + "/ctl/faults", {"pu_hidden": True, "ya_drop": 0, "g_500": 0.1})
-    code, r = app.post("/api/yandex/test")
-    assert code == 200 and r["photounlim_method"] is None and "НЕ отдаёт" in r["photounlim"], r
-    print("OK раздел «Фото» скрыт от API — программа честно об этом говорит:", r["photounlim"][:70])
+def web_flow():
+    """Раздел «Фото» скрыт от REST API → берём его через веб-API по кукам. Плюс: «молчащий» сервер
+    хранения Яндекса, потерянные ответы Google (защита от дублей), сверка MD5 и отчёт."""
+    mport, aport = free_port(), free_port()
+    ddir = tempfile.mkdtemp(prefix="ya2gd-web-")
+    mock = subprocess.Popen([sys.executable, os.path.join(ROOT, "tests", "mock_apis.py"), str(mport)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    M = f"http://127.0.0.1:{mport}"
+    time.sleep(1)
+    env = dict(os.environ, YA2GD_DATA=ddir, PYTHONUNBUFFERED="1", **env_for(mport))
+    for k in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
+        env.pop(k, None)
+    env["NO_PROXY"] = "127.0.0.1,localhost"
+    app = App(aport, ddir, env)
+    try:
+        app.start()
+        dead = "disk:/Фотокамера/IMG_0002.jpg"
+        http("POST", M + "/ctl/faults", {"pu_hidden": True, "dead": [dead], "g_lost": 0.3, "g_500": 0.05})
+        app.post("/api/settings", {"yandex_token": "good", "google_client_id": "cid",
+                                   "google_client_secret": "sec", "google_refresh_token": "rt-good",
+                                   "chunk_mb": 1, "workers": 4})
+        code, r = app.post("/api/yandex/test")
+        assert code == 200 and not r["photounlim_rest"] and r["photounlim_size"] > 0, r
+        print("OK REST API раздел «Фото» не отдаёт; объём виден:", r["photounlim_size"])
 
-    src = os.path.join(ddir, "Яндекс копии", "Фотокамера")
-    os.makedirs(os.path.join(src, "sub"))
-    files = {"2020-07-15 12-00-00.JPG": os.urandom(300_000), "sub/2021-01-02 08-30-00.MP4": os.urandom(2_500_000),
-             "IMG_без_даты.jpg": os.urandom(1000), "качается.jpg.tmp": b"x"}
-    old = time.time() - 3600
-    for rel, data in files.items():
-        fp = os.path.join(src, rel)
-        with open(fp, "wb") as f:
-            f.write(data)
-        os.utime(fp, (old, old))
-    young = os.path.join(src, "2022-02-02 02-02-02.jpg")   # ещё «скачивается»
-    with open(young, "wb") as f:
-        f.write(b"young")
-    app.post("/api/settings", {"local_dirs": os.path.dirname(src) + "\n", "local_delete_after": True,
-                               "local_watch": False})
-    code, r = app.post("/api/local/check")
-    assert r["dirs"][0]["ok"] and r["dirs"][0]["files"] == 5, r
-    app.post("/api/scan/local")
-    wait_for(lambda: not app.get("/api/status")["scan"]["running"], 30, "local scan")
-    app.post("/api/transfer/start")
-    wait_for(lambda: app.get("/api/status")["transfer"]["state"] == "done", 120, "local transfer")
-    drive = http("GET", M + "/ctl/drive")[1]
+        app.post("/api/settings", {"yandex_cookies": "Session_id=old; sessionid2=x; yandexuid=1"})
+        code, r = app.post("/api/yandex/web_test")
+        assert code == 400 and "Куки устарели" in r["error"], r
+        print("OK устаревшие куки — понятная ошибка:", r["error"][:60])
+        cookie_editor = json.dumps([{"name": "Session_id", "value": "good-session", "domain": ".yandex.ru"},
+                                    {"name": "sessionid2", "value": "x"}, {"name": "yandexuid", "value": "1"}])
+        app.post("/api/settings", {"yandex_cookies": cookie_editor})
+        code, r = app.post("/api/yandex/web_test")
+        assert code == 200 and "ссылка на оригинал выдаётся" in r["msg"], r
+        print("OK куки (экспорт Cookie-Editor) работают:", r["msg"])
 
-    def full(fid):
-        parts = []
-        while fid in drive:
-            parts.append(drive[fid]["name"])
-            fid = drive[fid]["parents"][0]
-        return "/".join(reversed(parts))
-    import hashlib
-    got = {full(fid): f["md5"] for fid, f in drive.items() if not f["folder"] and not f["trashed"]}
-    base = "Yandex Disk/Фото (безлимит)/"
-    exp = {base + "2020/2020-07/2020-07-15 12-00-00.JPG": hashlib.md5(files["2020-07-15 12-00-00.JPG"]).hexdigest(),
-           base + "2021/2021-01/2021-01-02 08-30-00.MP4": hashlib.md5(files["sub/2021-01-02 08-30-00.MP4"]).hexdigest(),
-           base + "Без даты/IMG_без_даты.jpg": hashlib.md5(files["IMG_без_даты.jpg"]).hexdigest()}
-    for k, v in exp.items():
-        assert got.get(k) == v, (k, sorted(x for x in got if "безлимит" in x))
-    assert not any("tmp" in k or "2022-02-02" in k for k in got)
-    left = sorted(os.path.relpath(os.path.join(d, f), src) for d, _, fs in os.walk(src) for f in fs)
-    assert left == ["2022-02-02 02-02-02.jpg", "качается.jpg.tmp"], left
-    print("OK папка на компьютере: файлы разложены по году/месяцу, MD5 совпал, локальные копии удалены; "
-          "недокачанные и .tmp не тронуты")
+        app.post("/api/scan/start", {"fresh": True})
+        wait_for(lambda: app.get("/api/status")["scan"]["state"] == "done", 60, "scan")
+        app.post("/api/transfer/start")
+
+        def deferred():
+            it = app.get("/api/files?q=IMG_0002")["items"][0]
+            return it["status"] == "pending" and "ждёт сервер" in (it["note"] or "") and it
+        wait_for(deferred, 60, "dead host deferral")
+        st = app.get("/api/status")
+        assert "localhost" in st["dead_hosts"], st["dead_hosts"]
+        print("OK «молчащий» сервер Яндекса распознан, файл отложен без траты попыток")
+        http("POST", M + "/ctl/faults", {"dead": []})       # сервер ожил
+        wait_for(lambda: app.get("/api/status")["transfer"]["state"] == "done", 180, "web transfer")
+        it = app.get("/api/files?q=IMG_0002")["items"][0]
+        assert it["status"] == "done" and it["attempts"] == 0, it
+        print("OK когда сервер ожил — файл перенесён сам")
+        check(app, M)
+        calls = http("GET", M + "/ctl/stats")[1]
+        assert calls["mpfs_url"] >= 2 and calls["small_uploads"] > 0, calls
+        print(f"OK раздел «Фото» перенесён через веб-API; потерянные ответы Google не дали дублей; "
+              f"всё сверено по MD5 (загрузок одним запросом: {calls['small_uploads']})")
+
+        st = app.get("/api/status")["stats"]
+        assert st["verified"] == st["by_status"]["done"]["count"], st
+        app.post("/api/actions/verify_drive")
+        wait_for(lambda: app.get("/api/status")["task"]["state"] == "done", 60, "verify")
+        msg = app.get("/api/status")["task"]["msg"]
+        assert "не совпало — 0" in msg and "нет на Drive — 0" in msg, msg
+        with urllib.request.urlopen(app.u("/api/report.csv")) as resp:
+            csv_text = resp.read().decode("utf-8-sig")
+        assert csv_text.count("\n") == st["by_status"]["done"]["count"] + 1, csv_text[:300]
+        print("OK сверка с Drive по размеру и MD5:", msg)
+    except Exception:
+        print("---- журнал программы ----")
+        print(open(os.path.join(ddir, "out.txt")).read()[-8000:])
+        raise
+    finally:
+        try:
+            app.stop()
+        except Exception:  # noqa
+            pass
+        mock.terminate()
+        shutil.rmtree(ddir, ignore_errors=True)
 
 
 def check(app, M):
@@ -264,4 +293,7 @@ def check(app, M):
 
 
 if __name__ == "__main__":
-    main()
+    if "--web-only" not in sys.argv:
+        main()
+    web_flow()
+    print("\nВСЕ ПРОВЕРКИ ПРОЙДЕНЫ")

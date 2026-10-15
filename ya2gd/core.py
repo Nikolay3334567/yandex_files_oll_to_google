@@ -11,6 +11,7 @@ import time
 DEFAULTS = {
     "yandex_token": "",
     "yandex_client_id": "",
+    "yandex_cookies": "",                 # куки disk.yandex.ru — для раздела «Фото» (безлимит)
     "google_client_id": "",
     "google_client_secret": "",
     "google_refresh_token": "",
@@ -20,24 +21,16 @@ DEFAULTS = {
     "photounlim_split": "month",          # none | year | month — раскладка безлимитных фото
     "scan_mode": "flat",                  # flat — плоский список всех файлов; tree — обход папок
     "include_photounlim": True,
-    "workers": 3,
+    "workers": 4,
     "chunk_mb": 32,
     "max_attempts": 6,
     "skip_existing": True,                # не заливать повторно файл, который уже есть на Drive (имя+md5)
     "verify_md5": True,
     "autostart": False,
-    # Папки на компьютере (по одной на строку) — для фото из раздела «Фото», которые API не отдаёт
-    "local_dirs": "",
-    "local_folder": "Фото (безлимит)",
-    "local_split": "month",               # keep — как в папке; year / month — по дате из имени файла
-    "local_watch": True,                  # пока идёт перенос — ждать и подхватывать новые файлы
-    "local_rescan_min": 5,
-    "local_min_age_sec": 120,             # не трогать файлы, менявшиеся недавно (ещё скачиваются)
-    "local_delete_after": False,          # удалять копию на компьютере после загрузки и сверки MD5                   # после запуска программы сразу продолжать перенос
     "port": 8765,
 }
 
-SECRET_KEYS = ("yandex_token", "google_client_secret", "google_refresh_token")
+SECRET_KEYS = ("yandex_token", "yandex_cookies", "google_client_secret", "google_refresh_token")
 
 
 def app_dir():

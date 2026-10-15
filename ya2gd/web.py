@@ -67,6 +67,9 @@ class Handler(BaseHTTPRequestHandler):
                 total, rows = e.db.list_files(qs.get("status") or None, qs.get("q") or None,
                                               int(qs.get("offset", 0)), min(500, int(qs.get("limit", 100))))
                 return self._send(200, {"total": total, "items": rows})
+            if u.path == "/api/report.csv":
+                return self._send(200, e.report_csv(), "text/csv; charset=utf-8",
+                                  {"Content-Disposition": 'attachment; filename="ya2gd-report.csv"'})
             if u.path == "/oauth/google/start":
                 auth = e.google_auth()
                 if not auth.client_id:
@@ -109,7 +112,7 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/settings":
                 clean = {k: v for k, v in b.items() if not (k.endswith("_set"))}
                 # маскированные секреты не перезаписываем
-                for k in ("yandex_token", "google_client_secret", "google_refresh_token"):
+                for k in ("yandex_token", "yandex_cookies", "google_client_secret", "google_refresh_token"):
                     if k in clean and (not clean[k] or "…" in str(clean[k])):
                         clean.pop(k)
                 if "google_client_id" in clean and clean["google_client_id"] != e.settings["google_client_id"]:
@@ -118,6 +121,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, e.settings.public())
             if p == "/api/yandex/test":
                 return self._send(200, e.test_yandex())
+            if p == "/api/yandex/web_test":
+                return self._send(200, e.test_yandex_web())
             if p == "/api/google/test":
                 return self._send(200, e.test_google())
             if p == "/api/google/logout":
@@ -126,10 +131,6 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/scan/start":
                 ok = e.start_scan(bool(b.get("fresh")))
                 return self._send(200, {"ok": ok})
-            if p == "/api/scan/local":
-                return self._send(200, {"ok": e.start_scan(only_local=True)})
-            if p == "/api/local/check":
-                return self._send(200, e.check_local_dirs())
             if p == "/api/scan/stop":
                 e.stop_scanning()
                 return self._send(200, {"ok": True})

@@ -80,6 +80,7 @@ a{color:var(--acc)}
 <div class="wrap">
   <div class="card">
     <div class="tiles" id="tiles"></div>
+    <div class="small muted" id="verText" style="margin-top:8px"></div>
   </div>
 
   <div class="card">
@@ -134,49 +135,45 @@ a{color:var(--acc)}
     </div>
   </div>
 
-  <div class="card">
-    <h2>3. Сканирование Яндекс Диска <span id="scanBadge" class="badge"></span></h2>
-    <div class="muted small" id="scanText"></div>
-    <div class="row" style="margin-top:10px">
-      <button class="primary" onclick="post('/api/scan/start',{fresh:false})" id="btnScan">Сканировать / продолжить</button>
-      <button onclick="if(confirm('Пересканировать с начала? Уже перенесённые файлы останутся отмеченными.'))post('/api/scan/start',{fresh:true})">Сканировать заново</button>
-      <button onclick="post('/api/scan/stop')">Остановить</button>
+  <div class="card" id="puCard">
+    <h2>3. Раздел «Фото» — автозагрузка с телефона <span id="puBadge" class="badge"></span></h2>
+    <div class="small" id="puInfo" style="margin-bottom:8px"></div>
+    <details class="small"><summary><b>Зачем куки и как их взять (2 минуты)</b></summary>
+      <p>Фото из безлимитной автозагрузки видны только в разделе «Фото», а официальный API Яндекса их не отдаёт.
+      Веб-версия Диска получает их плоским списком (с размером и MD5) и выдаёт ссылку на оригинал каждого файла —
+      программа делает то же самое от вашего имени. Для этого нужны куки вашего входа в Яндекс.
+      Файлы идут напрямую Яндекс → Google, на компьютер ничего не сохраняется.</p>
+      <ol>
+        <li>Поставьте расширение <b>Cookie-Editor</b> (<a href="https://chromewebstore.google.com/detail/cookie-editor/hlkenndednhfkekhgcdicdfddnkalmdm" target="_blank">Chrome / Яндекс.Браузер / Edge</a>,
+          <a href="https://addons.mozilla.org/ru/firefox/addon/cookie-editor/" target="_blank">Firefox</a>).</li>
+        <li>Откройте <a href="https://disk.yandex.ru/client/photo" target="_blank">disk.yandex.ru/client/photo</a> — там должны быть видны ваши фото.</li>
+        <li>Нажмите значок 🍪 расширения → <b>Export → Export as JSON</b> (скопируется в буфер).</li>
+        <li>Вставьте в поле ниже и нажмите «Сохранить и проверить».</li>
+      </ol>
+      <p>Можно вставить и строку заголовка <code>Cookie: …</code> из инструментов разработчика (F12 → Сеть).
+      Куки живут от нескольких дней до нескольких недель. Когда устареют, программа поставит на паузу только раздел «Фото»
+      и напишет об этом. Остальные файлы продолжат переноситься. Обновите куки и нажмите «Старт».
+      Куки — это доступ к вашему аккаунту: они хранятся только на этом компьютере, никому их не передавайте.</p>
+    </details>
+    <label>Куки disk.yandex.ru</label>
+    <textarea id="yandex_cookies" rows="3" style="width:100%;font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:7px;background:var(--input);color:var(--fg)" placeholder='[{"name":"Session_id","value":"…"}, …]  или  Session_id=…; sessionid2=…; yandexuid=…'></textarea>
+    <div class="row" style="margin-top:8px">
+      <button class="primary" onclick="saveCookies()">Сохранить и проверить</button>
     </div>
-    <div class="muted small" style="margin-top:6px">Перенос можно запускать, не дожидаясь конца сканирования: найденные файлы сразу попадают в очередь.</div>
+    <div class="res" id="puRes"></div>
   </div>
 
-  <div class="card" id="localCard">
-    <h2>4. Фото из раздела «Фото» (автозагрузка с телефона) <span id="localBadge" class="badge"></span></h2>
-    <div class="small" id="puInfo" style="margin-bottom:8px"></div>
-    <details class="small" open><summary><b>Почему так и что сделать</b></summary>
-      <p>Фото, которые телефон загружал в <b>безлимитную автозагрузку</b>, видны только в разделе «Фото» и не видны в «Файлах».
-      Яндекс хранит их отдельно и <b>не отдаёт через публичный API</b> (это подтверждала поддержка Яндекса).
-      Кнопка «Сохранить и проверить» в блоке 1 сама проверит это на вашем аккаунте. Если API их всё-таки отдаёт, они перенесутся напрямую, и этот блок не нужен.</p>
-      <p>Надёжный путь — официальная программа «Яндекс Диск» для Windows умеет скачать их на компьютер, а эта программа сразу заливает их в Google:</p>
-      <ol>
-        <li>Установите <a href="https://disk.yandex.ru/download" target="_blank">Яндекс Диск для Windows</a> и войдите в тот же аккаунт.</li>
-        <li>Настройки (шестерёнка) → «Автозагрузка» → включите <b>«Копировать фото и видео на компьютер»</b> и посмотрите, в какую папку.</li>
-        <li>Укажите эту папку ниже, нажмите «Проверить папки», затем «Старт» сверху.</li>
-        <li>Пока Яндекс докачивает, программа каждые несколько минут подхватывает новые файлы. Если на компьютере мало места, включите
-          «удалять копию после загрузки»: файл удаляется только после того, как MD5 на Google совпал с локальным.</li>
-      </ol>
-    </details>
-    <label>Папки на компьютере (по одной на строку)</label>
-    <textarea id="local_dirs" rows="3" style="width:100%;font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:7px;background:var(--input);color:var(--fg)" placeholder="C:\Users\Имя\YandexDisk\Фотокамера"></textarea>
-    <div class="grid" style="grid-template-columns:1fr 1fr;gap:0 12px">
-      <div><label>Куда на Google Drive (внутри общей папки)</label><input id="local_folder"></div>
-      <div><label>Раскладка</label><select id="local_split"><option value="month">Год / месяц (по дате из имени файла)</option>
-        <option value="year">По годам</option><option value="keep">Как в папке на компьютере</option></select></div>
-      <div><label>Пересканировать каждые, мин</label><input id="local_rescan_min" type="number" min="1"></div>
-      <div><label>Не брать файлы моложе, с</label><input id="local_min_age_sec" type="number" min="0"></div>
+  <div class="card">
+    <h2>4. Список файлов <span id="scanBadge" class="badge"></span></h2>
+    <div class="small muted">Программа получает у Яндекса готовый плоский список всех файлов: «Файлы» — официальным API, раздел «Фото» — как веб-версия.
+      Ничего не скачивается, только список с размерами и MD5.</div>
+    <div class="muted small" id="scanText"></div>
+    <div class="row" style="margin-top:10px">
+      <button class="primary" onclick="post('/api/scan/start',{fresh:false})" id="btnScan">Получить список / продолжить</button>
+      <button onclick="if(confirm('Получить список заново? Уже перенесённые файлы останутся отмеченными.'))post('/api/scan/start',{fresh:true})">Обновить список с начала</button>
+      <button onclick="post('/api/scan/stop')">Остановить</button>
     </div>
-    <div class="chk"><input type="checkbox" id="local_watch"><span>Пока идёт перенос — ждать и подхватывать новые файлы (не завершаться)</span></div>
-    <div class="chk"><input type="checkbox" id="local_delete_after"><span>Удалять копию на компьютере после загрузки и совпадения MD5 (экономит место)</span></div>
-    <div class="row">
-      <button class="primary" onclick="saveLocal()">Сохранить и проверить папки</button>
-      <button onclick="post('/api/scan/local')">Сканировать папки сейчас</button>
-    </div>
-    <div class="res" id="localRes"></div>
+    <div class="muted small" style="margin-top:6px">Перенос можно запускать сразу: файлы попадают в очередь по мере получения списка.</div>
   </div>
 
   <div class="grid">
@@ -194,7 +191,7 @@ a{color:var(--acc)}
         <div><label>Попыток на файл</label><input id="max_attempts" type="number" min="1"></div>
         <div><label>Порт интерфейса</label><input id="port" type="number"></div>
       </div>
-      <div class="chk"><input type="checkbox" id="include_photounlim"><span>Пробовать читать раздел «Фото» (безлимит) через API Яндекса</span></div>
+      <div class="chk"><input type="checkbox" id="include_photounlim"><span>Переносить раздел «Фото» (безлимит)</span></div>
       <div class="chk"><input type="checkbox" id="skip_existing"><span>Не заливать повторно файл, который уже лежит на Drive (то же имя и MD5)</span></div>
       <div class="chk"><input type="checkbox" id="verify_md5"><span>Проверять MD5 после загрузки</span></div>
       <div class="chk"><input type="checkbox" id="autostart"><span>При запуске программы сам продолжать прерванный перенос</span></div>
@@ -207,9 +204,10 @@ a{color:var(--acc)}
       <h2>Обслуживание</h2>
       <div class="kv" id="taskBox"></div>
       <div style="display:grid;gap:8px;margin-top:10px">
-        <button onclick="post('/api/actions/retry_errors')">↻ Повторить файлы с ошибками</button>
-        <div class="small muted">Если удалили что-то на Google Drive и хотите докачать удалённое:</div>
-        <button onclick="post('/api/actions/verify_drive')">🔎 Сверить с Google Drive (удалённое → снова в очередь)</button>
+        <button onclick="post('/api/actions/retry_errors')">↻ Повторить ошибки и отложенные сейчас</button>
+        <div class="small muted">Сверка находит удалённые на Drive и несовпавшие файлы и ставит их в очередь:</div>
+        <button onclick="post('/api/actions/verify_drive')">🔎 Полная сверка с Google Drive (размер и MD5 каждого файла)</button>
+        <a href="/api/report.csv"><button style="width:100%">⬇ Отчёт по всем файлам (CSV для Excel)</button></a>
         <div class="small muted">Полностью начать перенос заново (список файлов сохранится):</div>
         <button class="danger" onclick="if(confirm('Поставить ВСЕ файлы в очередь заново?'))post('/api/actions/requeue_all')">⟲ Начать перенос заново</button>
         <button class="danger" onclick="if(confirm('Удалить всю базу (список файлов и прогресс)? Файлы на Drive не трогаются.'))post('/api/actions/reset_db')">🗑 Очистить базу полностью</button>
@@ -222,7 +220,7 @@ a{color:var(--acc)}
     <div class="row">
       <select id="fStatus" style="width:auto" onchange="page=0;loadFiles()">
         <option value="">Все</option><option value="pending">В очереди</option><option value="active">В работе</option>
-        <option value="done">Готово</option><option value="error">Ошибки</option><option value="skipped">Пропущены</option>
+        <option value="done">Готово</option><option value="waiting">Ждут Яндекса</option><option value="error">Ошибки</option><option value="skipped">Пропущены</option>
       </select>
       <input id="fQuery" placeholder="Поиск по пути" style="flex:1;min-width:160px" oninput="page=0;clearTimeout(window._qt);window._qt=setTimeout(loadFiles,300)">
       <button onclick="page=Math.max(0,page-1);loadFiles()">←</button>
@@ -290,9 +288,9 @@ async function saveYandex(){
     const r = await api('/api/yandex/test',{method:'POST',headers:{'X-Ya2gd':'1'}});
     $('yaRes').innerHTML = `✅ Токен рабочий. Пользователь: <b>${esc(r.user)}</b>\nЗанято: ${fmtB(r.used)} из ${fmtB(r.total)}`+
       (r.photounlim_size?`\nБезлимитные фото: ${fmtB(r.photounlim_size)}`:'')+
-      `\nСписок всех файлов («Файлы»): ${esc(r.files_api)}\nРаздел «Фото» (безлимит): ${esc(r.photounlim)}`+
-      `\n<span class="muted">${esc((r.photounlim_report||[]).join('\n'))}</span>`;
-    showPU(r);
+      `\nСписок всех файлов («Файлы»): ${esc(r.files_api)}`+
+      `\nРаздел «Фото» (безлимит): ${r.photounlim_size?fmtB(r.photounlim_size):'пуст'}` +
+      (r.photounlim_size ? (r.photounlim_rest ? ' — отдаётся официальным API' : ' — официальный API не отдаёт, нужен блок 3 (куки)') : '');
   }catch(e){ $('yaRes').textContent='❌ '+e.message; }
 }
 function yaToken(){
@@ -300,18 +298,14 @@ function yaToken(){
   post('/api/settings',{yandex_client_id:id});
   window.open('https://oauth.yandex.ru/authorize?response_type=token&client_id='+encodeURIComponent(id),'_blank');
 }
-function showPU(r){
-  const sz = +(r.photounlim_size||0);
-  $('puInfo').innerHTML = r.photounlim_method ? '✅ Фото из раздела «Фото» доступны через API — перенесутся напрямую при сканировании Яндекса.'
-    : (sz ? `⚠ В разделе «Фото» лежит <b>${fmtB(sz)}</b>, и API Яндекса их не отдаёт. Используйте этот блок.` : '');
-}
-async function saveLocal(){
-  $('localRes').textContent='Проверяю…';
+async function saveCookies(){
+  $('puRes').textContent='Проверяю…';
   try{
-    await post('/api/settings', collect(['local_dirs','local_folder','local_split','local_rescan_min','local_min_age_sec','local_watch','local_delete_after']));
-    const r = await api('/api/local/check',{method:'POST',headers:{'X-Ya2gd':'1'}});
-    $('localRes').innerHTML = r.dirs.length ? r.dirs.map(d=> d.ok ? `✅ ${esc(d.dir)} — ${d.files.toLocaleString('ru')} файлов, ${fmtB(d.bytes)}` : `❌ ${esc(d.dir)} — ${esc(d.msg)}`).join('\n') : 'Папки не указаны';
-  }catch(e){ $('localRes').textContent='❌ '+e.message; }
+    await post('/api/settings', collect(['yandex_cookies']));
+    await loadSettings();
+    const r = await api('/api/yandex/web_test',{method:'POST',headers:{'X-Ya2gd':'1'}});
+    $('puRes').textContent='✅ '+r.msg;
+  }catch(e){ $('puRes').textContent='❌ '+e.message; }
 }
 async function googleLogin(){
   await post('/api/settings', collect(['google_client_id','google_client_secret']));
@@ -354,9 +348,12 @@ async function refresh(){
   const map = {idle:['Ожидание',''],running:['Идёт перенос','b-acc'],pausing:['Останавливаюсь…','b-warn'],paused:['На паузе','b-warn'],done:['Завершено','b-ok']};
   let [txt,cls] = map[t.state]||[t.state,''];
   if(t.state==='running' && t.cooldown_until) { txt='Ждём лимит Google до '+new Date(t.cooldown_until*1000).toLocaleTimeString('ru'); cls='b-warn'; }
-  if(t.state==='running' && !t.cooldown_until && !s.active.length && !(bs.pending||{}).count && s.watching_local) { txt='Жду новые файлы в папках'; }
-  $('localBadge').textContent = s.watching_local ? 'папки отслеживаются' : '';
-  $('localBadge').className = 'badge b-acc';
+  if(t.state==='running' && !t.cooldown_until && !s.active.length && s.stats.waiting.count) { txt='Жду, когда Яндекс отдаст отложенные файлы'; cls='b-warn'; }
+  const pu = s.photounlim;
+  $('puBadge').textContent = pu.problem ? 'нужно обновить куки' : (pu.mode==='web' ? 'куки заданы' : (pu.mode==='rest' ? 'через API' : 'не настроен'));
+  $('puBadge').className = 'badge ' + (pu.problem ? 'b-err' : (pu.mode ? 'b-ok' : 'b-warn'));
+  $('puInfo').innerHTML = pu.problem ? `<span style="color:var(--err)">⚠ ${esc(pu.problem)}</span>` :
+    (pu.size ? `В разделе «Фото»: <b>${fmtB(pu.size)}</b>.` : '');
   $('stateBadge').textContent = txt + (t.state==='running'?` · потоков ${t.workers}`:'');
   $('stateBadge').className = 'badge '+cls;
   $('reason').textContent = t.reason ? '⚠ '+t.reason : '';
@@ -364,7 +361,10 @@ async function refresh(){
   $('btnPause').disabled = t.state!=='running';
 
   $('tiles').innerHTML = tile('','Всего',total) + tile('done','Готово',sum('done'),'') + tile('pending','В очереди',sum('pending'))+
-    tile('active','В работе',sum('active')) + tile('error','Ошибки',sum('error'), sum('error').count?'b-err':'') + tile('skipped','Пропущено',sum('skipped'));
+    tile('active','В работе',sum('active')) + tile('waiting','Ждут Яндекса',s.stats.waiting, s.stats.waiting.count?'b-warn':'') +
+    tile('error','Ошибки',sum('error'), sum('error').count?'b-err':'') + tile('skipped','Пропущено',sum('skipped'));
+  $('verText').textContent = `Проверено по MD5 (на Google тот же размер и MD5, что на Яндексе): ${s.stats.verified.toLocaleString('ru')} из ${sum('done').count.toLocaleString('ru')} готовых`+
+    (s.dead_hosts.length?` · молчащих серверов Яндекса: ${s.dead_hosts.length}`:'');
 
   $('active').innerHTML = s.active.length ? s.active.map(a=>{
     const p = a.size? a.done/a.size*100 : 100;
@@ -376,8 +376,8 @@ async function refresh(){
   const smap = {never:['не выполнялось','b-warn'],running:['идёт','b-acc'],done:['завершено','b-ok'],stopped:['остановлено','b-warn'],interrupted:['прервано','b-err']};
   const [stx,scl] = sc.running ? smap.running : (smap[sc.state]||[sc.state,'']);
   $('scanBadge').textContent = stx; $('scanBadge').className='badge '+scl;
-  $('scanText').textContent = `Найдено в этом проходе: ${sc.found.toLocaleString('ru')} файлов` +
-    (sc.phase&&sc.phase!=='done'?` · этап: ${({main:'Файлы',photounlim:'раздел «Фото»',local:'папки на компьютере'})[sc.phase]||sc.phase}`:'') + (sc.error?` · ошибка: ${sc.error}`:'');
+  $('scanText').textContent = `Получено: ${sc.found.toLocaleString('ru')} файлов` +
+    (sc.phase&&sc.phase!=='done'?` · этап: ${({main:'«Файлы»',photounlim:'раздел «Фото»'})[sc.phase]||sc.phase}`:'') + (sc.error?` · ошибка: ${sc.error}`:'');
   $('btnScan').disabled = sc.running;
   const tk = s.task;
   $('taskBox').innerHTML = tk.name ? `<span class="muted">Операция:</span><span>${esc(tk.name)} — ${tk.state==='running'?'выполняется…':(tk.state==='error'?'ошибка':'готово')}</span>
@@ -404,7 +404,7 @@ async function loadFiles(){
   const pages = Math.max(1,Math.ceil(r.total/lim)); if(page>=pages){page=pages-1;}
   $('fPage').textContent = `стр. ${page+1} из ${pages} · ${r.total.toLocaleString('ru')} файлов`;
   $('fBody').innerHTML = r.items.map(f=>`<tr><td class="path">${esc(f.path)}</td><td>${fmtB(f.size)}</td>
-    <td><span class="badge ${STB[f.status]}">${ST[f.status]||f.status}</span>${f.attempts?`<div class="small muted">попыток: ${f.attempts}</div>`:''}
+    <td><span class="badge ${STB[f.status]}">${ST[f.status]||f.status}</span>${f.verified?'<div class="small" style="color:var(--ok)">✓ MD5 сверен</div>':''}${f.attempts?`<div class="small muted">попыток: ${f.attempts}</div>`:''}
     ${f.status==='pending'&&f.bytes_done?`<div class="small muted">передано ${fmtB(f.bytes_done)}</div>`:''}</td>
     <td class="small">${esc(f.note||'')} <span style="color:var(--err)">${esc(f.last_error||'')}</span>
     ${f.gd_id?`<div><a target="_blank" href="https://drive.google.com/file/d/${esc(f.gd_id)}/view">открыть на Drive</a></div>`:''}</td>

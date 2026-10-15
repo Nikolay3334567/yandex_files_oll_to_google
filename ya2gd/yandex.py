@@ -8,6 +8,7 @@
 """
 import time
 
+from .fetch import open_download
 from .http_util import (ApiError, AuthError, NETWORK_ERRORS, RateLimited, backoff,
                         env_url, session, CONNECT_TIMEOUT, READ_TIMEOUT)
 
@@ -159,31 +160,8 @@ class YandexClient:
         return href
 
     def open_stream(self, path, offset=0):
-        """Открывает поток скачивания с нужного байта. Возвращает (response, real_offset).
-
-        Если сервер проигнорировал Range (ответил 200), лишние байты будут пропущены вызывающим.
-        """
-        href = self.download_href(path)
-        headers = {"Accept-Encoding": "identity"}
-        if offset:
-            headers["Range"] = f"bytes={offset}-"
-        r = session().get(href, headers=headers, stream=True, allow_redirects=True,
-                          timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
-        if r.status_code == 206:
-            return r, offset
-        if r.status_code == 200:
-            return r, 0
-        text = r.text[:300]
-        r.close()
-        if r.status_code in (401, 403):
-            raise ApiError(f"Яндекс: ссылка скачивания отклонена HTTP {r.status_code}: {text}",
-                           status=r.status_code, retryable=True)
-        if r.status_code == 404:
-            raise ApiError("Яндекс: файл не найден при скачивании (удалён?)", status=404)
-        if r.status_code == 416:
-            raise ApiError("Яндекс: неверный диапазон (файл изменился?)", status=416)
-        raise ApiError(f"Яндекс: скачивание HTTP {r.status_code}: {text}", status=r.status_code,
-                       retryable=r.status_code >= 500 or r.status_code == 429)
+        """Поток скачивания с нужного байта: (response, фактическое_смещение)."""
+        return open_download(self.download_href(path), offset)
 
 
 def _safe_json(r):
