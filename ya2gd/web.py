@@ -2,10 +2,14 @@
 import html
 import json
 import os
+import shutil
+import threading
+import time
 import traceback
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from . import __version__, winsys
 from .http_util import ApiError
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -58,7 +62,12 @@ class Handler(BaseHTTPRequestHandler):
                 with open(os.path.join(STATIC, "index.html"), "rb") as f:
                     return self._send(200, f.read(), "text/html; charset=utf-8")
             if u.path == "/api/status":
-                return self._send(200, e.status())
+                st = e.status()
+                st["version"] = __version__
+                st["data_dir"] = e.dir
+                return self._send(200, st)
+            if u.path == "/api/drives":
+                return self._send(200, winsys.list_drives())
             if u.path == "/api/settings":
                 return self._send(200, e.settings.public())
             if u.path == "/api/log":
@@ -118,7 +127,19 @@ class Handler(BaseHTTPRequestHandler):
                 if "google_client_id" in clean and clean["google_client_id"] != e.settings["google_client_id"]:
                     clean.setdefault("google_refresh_token", "")
                 e.settings.update(**clean)
+                if "win_autorun" in clean:
+                    winsys.set_autorun(e.settings["win_autorun"])
                 return self._send(200, e.settings.public())
+            if p == "/api/pick_folder":
+                return self._send(200, {"path": winsys.pick_folder(b.get("initial") or "")})
+            if p == "/api/buffer/check":
+                return self._send(200, _check_buffer(b.get("path") or ""))
+            if p == "/api/actions/previews":
+                e.rescue_previews()
+                return self._send(200, {"ok": True})
+            if p == "/api/quit":
+                threading.Thread(target=_quit, args=(e,), daemon=True).start()
+                return self._send(200, {"ok": True})
             if p == "/api/yandex/test":
                 return self._send(200, e.test_yandex())
             if p == "/api/yandex/web_test":
@@ -169,8 +190,45 @@ def _page(msg, back=False):
             f'<h3>{html.escape(str(msg))}</h3>{link}</body>')
 
 
+def _check_buffer(path):
+    """Проверка папки буфера: можно ли писать, сколько места."""
+    path = (path or "").strip().strip('"')
+    if not path:
+        return {"ok": True, "msg": "Буфер на диске выключен: маленькие файлы ждут в памяти, большие идут напрямую"}
+    if not os.path.isabs(path):
+        raise ApiError("Укажите полный путь, например D:\\YandexBuffer")
+    try:
+        os.makedirs(path, exist_ok=True)
+        probe = os.path.join(path, ".ya2gd-probe")
+        with open(probe, "wb") as f:
+            f.write(b"x" * 4096)
+        os.remove(probe)
+        du = shutil.disk_usage(path)
+    except OSError as ex:
+        raise ApiError(f"В папку «{path}» нельзя писать: {ex}")
+    return {"ok": True, "free": du.free, "total": du.total,
+            "msg": f"Папка доступна, свободно {du.free / 2**30:.1f} ГБ из {du.total / 2**30:.1f} ГБ"}
+
+
+def _quit(engine):
+    engine.log("Выход по команде из окна программы: останавливаю перенос…")
+    engine.stop_scanning()
+    engine.pause_transfer("выход из программы", by_user=False)
+    t0 = time.time()
+    while engine.transferring() and time.time() - t0 < 60:
+        time.sleep(0.5)
+    engine.log("Программа закрыта. Прогресс сохранён — при следующем запуске всё продолжится.")
+    winsys.allow_sleep()
+    time.sleep(0.5)
+    os._exit(0)
+
+
+class _Server(ThreadingHTTPServer):
+    # На Windows SO_REUSEADDR позволяет второй программе занять тот же порт — запрещаем
+    allow_reuse_address = not winsys.WIN
+    daemon_threads = True
+
+
 def serve(engine, port):
     Handler.engine = engine
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    httpd.daemon_threads = True
-    return httpd
+    return _Server(("127.0.0.1", port), Handler)

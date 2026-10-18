@@ -3,18 +3,25 @@
 Используемые методы:
 - GET /v1/disk                       — информация о Диске (проверка токена);
 - GET /v1/disk/resources/files       — плоский список ВСЕХ файлов Диска (без обхода папок);
-- GET /v1/disk/resources?path=...    — содержимое папки (обход дерева, в т.ч. photounlim:/);
-- GET /v1/disk/resources/download    — временная ссылка на скачивание файла.
+- GET /v1/disk/resources?path=...    — содержимое папки (обход дерева); с preview_size — ссылки на превью;
+- GET /v1/disk/resources/download    — временная ссылка на скачивание конкретного файла.
+
+Все запросы к API идут не чаще REQUEST_INTERVAL на всю программу — Яндекс сейчас работает
+в аварийном режиме, и лишняя нагрузка может обернуться блокировкой.
 """
+import os
 import time
 
-from .fetch import open_download
-from .http_util import (ApiError, AuthError, NETWORK_ERRORS, RateLimited, backoff,
+from .fetch import fetch_small, is_yandex_host, open_download
+from .http_util import (ApiError, AuthError, NETWORK_ERRORS, RateLimited, RateLimiter, backoff,
                         env_url, session, CONNECT_TIMEOUT, READ_TIMEOUT)
 
 API = env_url("YA2GD_YANDEX_API", "https://cloud-api.yandex.net/v1/disk")
+REQUEST_INTERVAL = float(os.environ.get("YA2GD_YANDEX_INTERVAL", "0.15"))   # ≈ 6-7 запросов в секунду
+RATE = RateLimiter(REQUEST_INTERVAL)
 
 ITEM_FIELDS = "path,name,type,size,md5,sha256,modified,created,mime_type,media_type,exif"
+PREVIEW_SIZES = ("XXXL", "XXL", "XL", "L", "M")
 
 
 def norm_item(it):
@@ -47,42 +54,50 @@ class YandexClient:
 
     def _get(self, url, params=None, tries=8, forbidden_is_auth=True):
         if not self.token:
-            raise AuthError("Токен Яндекса не задан")
+            raise AuthError("Токен Яндекса не задан", service="yandex")
         last = None
         for attempt in range(tries):
+            RATE.wait(self.stop_event)
             try:
                 r = session().get(url, params=params, headers=self._headers(),
                                   timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
             except NETWORK_ERRORS as e:
-                last = ApiError(f"Сеть (Яндекс): {e}", retryable=True)
+                last = ApiError(f"Сеть (Яндекс): {e}", retryable=True, service="yandex")
             else:
                 if r.status_code == 200:
                     return r.json()
                 body = _safe_json(r)
                 desc = body.get("description") or body.get("message") or r.text[:300]
-                if r.status_code == 401:
-                    raise AuthError(f"Яндекс: токен не принят ({desc})", status=r.status_code)
-                if r.status_code == 403 and not forbidden_is_auth:
-                    raise ApiError(f"Яндекс: доступ запрещён ({desc})", status=403)
-                if r.status_code == 403:
+                st = r.status_code
+                if st == 401:
+                    raise AuthError(f"Яндекс: токен не принят ({desc})", status=st, service="yandex")
+                if st == 403 and not forbidden_is_auth:
+                    raise ApiError(f"Яндекс: доступ запрещён ({desc})", status=403, service="yandex")
+                if st == 403:
                     raise AuthError(f"Яндекс: нет доступа ({desc}). Проверьте права приложения "
-                                    f"(нужно «Чтение всего Диска»).", status=403)
-                if r.status_code == 404:
-                    raise ApiError(f"Яндекс: не найдено ({desc})", status=404)
-                if r.status_code == 429:
-                    last = RateLimited(f"Яндекс: слишком много запросов", status=429, retryable=True)
-                elif r.status_code >= 500:
-                    last = ApiError(f"Яндекс: ошибка сервера {r.status_code} ({desc})",
-                                    status=r.status_code, retryable=True)
+                                    f"(нужно «Чтение всего Диска»).", status=403, service="yandex")
+                if st == 404:
+                    raise ApiError(f"Яндекс: не найдено ({desc})", status=404, service="yandex")
+                if st == 410:
+                    # С октября 2026 так отвечают на разделы, лежавшие в пострадавших дата-центрах
+                    raise ApiError(f"Яндекс: ресурс недоступен (410 Gone: {desc})", status=410, service="yandex")
+                if st == 429:
+                    raise RateLimited("Яндекс: слишком много запросов (429)", status=429, retryable=True,
+                                      service="yandex")
+                if st >= 500:
+                    last = ApiError(f"Яндекс: ошибка сервера {st} ({desc})", status=st, retryable=True,
+                                    service="yandex")
                 else:
-                    raise ApiError(f"Яндекс: HTTP {r.status_code} ({desc})", status=r.status_code, body=body)
+                    raise ApiError(f"Яндекс: HTTP {st} ({desc})", status=st, body=body, service="yandex")
+            if attempt == tries - 1:
+                break
             delay = backoff(attempt, base=2, cap=60)
             self.log(f"{last} — повтор через {delay:.0f} c", level="warn")
             if self.stop_event is not None and self.stop_event.wait(delay):
                 break
             elif self.stop_event is None:
                 time.sleep(delay)
-        raise last or ApiError("Яндекс: не удалось выполнить запрос")
+        raise last or ApiError("Яндекс: не удалось выполнить запрос", service="yandex")
 
     # ---- информация ----
     def disk_info(self):
@@ -98,7 +113,7 @@ class YandexClient:
 
     # ---- обход папки ----
     def dir_page(self, path, offset, limit=1000, tries=8):
-        """Возвращает (files, subdirs, total)."""
+        """Возвращает (files, subdirs, total, raw)."""
         fields = ",".join(f"_embedded.items.{f}" for f in ITEM_FIELDS.split(",")) + \
             ",_embedded.total,_embedded.limit,_embedded.offset,type,path"
         data = self._get(f"{API}/resources",
@@ -113,10 +128,8 @@ class YandexClient:
 
     # ---- раздел «Фото»: безлимитная автозагрузка (photounlim) ----
     # Официально не документирован. Пробуем все известные варианты; какой сработал — запоминаем.
-    PHOTOUNLIM_METHODS = ("tree", "flat")
-
     def photounlim_flat_page(self, offset, limit=1000):
-        """Вариант 2: GET /v1/disk/photounlim/resources/last-modified (замечен в приложениях Яндекса)."""
+        """GET /v1/disk/photounlim/resources/last-modified (замечен в приложениях Яндекса)."""
         data = self._get(f"{API}/photounlim/resources/last-modified",
                          params={"limit": limit, "offset": offset}, tries=3, forbidden_is_auth=False)
         raw = data.get("items") or (data.get("_embedded") or {}).get("items") or []
@@ -142,26 +155,63 @@ class YandexClient:
         return None, report
 
     # ---- скачивание ----
-    def download_href(self, path):
+    def download_href(self, path, tries=4):
         if path.startswith("photounlim:"):
             try:
-                data = self._get(f"{API}/resources/download", params={"path": path}, tries=4,
+                data = self._get(f"{API}/resources/download", params={"path": path}, tries=tries,
                                  forbidden_is_auth=False)
             except ApiError as e:
                 if e.retryable:
                     raise
-                data = self._get(f"{API}/photounlim/resources/download", params={"path": path}, tries=4,
+                data = self._get(f"{API}/photounlim/resources/download", params={"path": path}, tries=tries,
                                  forbidden_is_auth=False)
         else:
-            data = self._get(f"{API}/resources/download", params={"path": path})
+            data = self._get(f"{API}/resources/download", params={"path": path}, tries=tries)
         href = data.get("href")
         if not href:
-            raise ApiError(f"Яндекс не выдал ссылку на скачивание: {data}")
+            raise ApiError(f"Яндекс не выдал ссылку на скачивание: {data}", service="yandex")
         return href
 
     def open_stream(self, path, offset=0):
         """Поток скачивания с нужного байта: (response, фактическое_смещение)."""
         return open_download(self.download_href(path), offset)
+
+    # ---- превью (если оригинал недоступен) ----
+    def preview(self, path):
+        """Самое крупное доступное превью: (bytes, content-type, размер) или исключение."""
+        last = None
+        for size in PREVIEW_SIZES:
+            try:
+                data = self._get(f"{API}/resources", tries=2, forbidden_is_auth=False,
+                                 params={"path": path, "preview_size": size, "preview_crop": "false",
+                                         "fields": "preview,sizes,media_type"})
+            except AuthError:
+                raise
+            except ApiError as e:
+                last = e
+                continue
+            urls = [data.get("preview")] + [s.get("url") for s in data.get("sizes") or []
+                                            if s.get("name") == size]
+            for url in filter(None, urls):
+                url = "https:" + url if url.startswith("//") else url
+                headers = self._headers() if is_yandex_host(url) else {}
+                try:
+                    body, ctype = fetch_small(url, headers=headers)
+                except ApiError as e:
+                    last = e
+                    continue
+                if looks_like_image(body, ctype):
+                    return body, ctype, size
+                last = ApiError(f"превью {size}: пришло не изображение ({ctype}, {len(body)} байт)")
+        raise last or ApiError("превью недоступно")
+
+
+def looks_like_image(body, ctype):
+    if len(body) < 512:
+        return False
+    magic = (body.startswith(b"\xff\xd8\xff") or body.startswith(b"\x89PNG") or body[8:12] == b"WEBP"
+             or body[4:12] in (b"ftypheic", b"ftypmif1", b"ftypavif"))
+    return magic or ctype.startswith("image/")
 
 
 def _safe_json(r):

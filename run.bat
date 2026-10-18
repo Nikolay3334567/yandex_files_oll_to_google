@@ -16,6 +16,6 @@ if not exist ".venv\Scripts\python.exe" (
 )
 ".venv\Scripts\python.exe" -m pip install -q --disable-pip-version-check -r requirements.txt || (pause & exit /b 1)
 
-echo Запуск. Интерфейс откроется в браузере. НЕ закрывайте это окно, пока идёт перенос.
+echo Запуск. Интерфейс откроется отдельным окном. НЕ закрывайте ЭТО окно, пока идёт перенос.
 ".venv\Scripts\python.exe" -m ya2gd %*
 pause

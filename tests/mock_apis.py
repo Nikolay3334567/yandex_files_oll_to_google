@@ -32,7 +32,11 @@ def make_files(seed=1):
         add(f"disk:/Много/Папка{i % 3}/file{i}.bin", rnd.randint(1, 50_000))
     add("photounlim:/2019-05-04 10-00-00.JPG", 200_000)
     add("photounlim:/2021-12-31 23-59-59.MP4", 2_100_000)
+    add("photounlim:/2020-07-15 12-30-00.JPG", 150_000)
     return files
+
+
+PREVIEW = b"\xff\xd8\xff\xe0" + b"preview-jpeg" * 200
 
 
 class State:
@@ -43,8 +47,13 @@ class State:
         self.sessions = {}    # sid -> {meta, size, data}
         self.faults = {"ya_drop": 0.0, "g_500": 0.0, "slow": 0.0, "pu_hidden": False,
                        "dead": [],          # пути файлов, чей сервер хранения «молчит»
+                       "e504": [],          # пути файлов, на которые Яндекс отвечает 504
+                       "rest_410": False,   # REST API отвечает 410 Gone на «Файлы» (как в октябре 2026)
+                       "ya_429": 0,         # сколько раз подряд ответить 429 на ссылку для скачивания
                        "web_session": "good-session"}
-        self.calls = {"chunks": 0, "mpfs_url": 0, "small_uploads": 0}
+        self.calls = {"chunks": 0, "mpfs_url": 0, "small_uploads": 0, "previews": 0, "ya_download_links": 0,
+                      "ranges": 0, "max_parallel_dl": 0}
+        self.parallel = 0
 
 
 S = State()
@@ -93,6 +102,17 @@ class H(BaseHTTPRequestHandler):
                                                                if k.startswith("photounlim:"))})
         if S.faults["pu_hidden"] and (p.startswith("/photounlim/") or qs.get("path", "").startswith("photounlim:")):
             return self.send_json(403, {"error": "ForbiddenError", "description": "Нет доступа"})
+        if S.faults["rest_410"] and p in ("/resources/files", "/resources", "/resources/download") \
+                and not qs.get("path", "disk:").startswith("photounlim:") and "preview_size" not in qs:
+            return self.send_json(410, {"error": "GoneError", "description": "Ресурс больше недоступен."})
+        if p == "/resources" and "preview_size" in qs:
+            path = qs["path"]
+            if path not in S.ya:
+                return self.send_json(404, {"error": "DiskNotFoundError", "description": "Не найдено"})
+            u = f"http://127.0.0.1:{self.server.server_address[1]}/preview?" + urllib.parse.urlencode(
+                {"p": path, "size": qs["preview_size"]})
+            return self.send_json(200, {"preview": u, "sizes": [{"name": qs["preview_size"], "url": u}],
+                                        "media_type": "image"})
         if p == "/resources/files":
             off, lim = int(qs.get("offset", 0)), int(qs.get("limit", 20))
             paths = sorted(x for x in S.ya if x.startswith("disk:"))
@@ -119,6 +139,10 @@ class H(BaseHTTPRequestHandler):
                 "items": items[off:off + lim], "total": len(items), "offset": off, "limit": lim}})
         if p == "/resources/download":
             path = qs["path"]
+            S.calls["ya_download_links"] += 1
+            if S.faults["ya_429"] > 0:
+                S.faults["ya_429"] -= 1
+                return self.send_json(429, {"error": "TooManyRequestsError", "description": "Слишком много"})
             if path not in S.ya:
                 return self.send_json(404, {"error": "DiskNotFoundError", "description": "Не найдено"})
             return self.send_json(200, {"href": f"http://127.0.0.1:{self.server.server_address[1]}/dl?"
@@ -135,7 +159,30 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    def preview(self, qs):
+        ok = self.headers.get("Authorization") == "OAuth good" or self.web_ok()
+        if not ok:
+            return self.send_json(401, {"error": "unauthorized"})
+        S.calls["previews"] += 1
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(PREVIEW)))
+        self.end_headers()
+        self.wfile.write(PREVIEW)
+
     def dl(self, qs):
+        if qs["p"] in S.faults["e504"]:
+            return self.send_json(504, {"error": "gateway timeout"})
+        with S.lock:
+            S.parallel += 1
+            S.calls["max_parallel_dl"] = max(S.calls["max_parallel_dl"], S.parallel)
+        try:
+            return self._dl(qs)
+        finally:
+            with S.lock:
+                S.parallel -= 1
+
+    def _dl(self, qs):
         if qs["p"] in S.faults["dead"]:
             import time
             time.sleep(3)          # сервер не отвечает (таймаут клиента меньше)
@@ -151,6 +198,7 @@ class H(BaseHTTPRequestHandler):
         rng = self.headers.get("Range")
         if rng:
             start = int(re.match(r"bytes=(\d+)-", rng).group(1))
+            S.calls["ranges"] += 1
             self.send_response(206)
             self.send_header("Content-Range", f"bytes {start}-{len(data) - 1}/{len(data)}")
         else:
@@ -206,19 +254,32 @@ class H(BaseHTTPRequestHandler):
             rp = body.get("requestParams") or {}
             if m == "mpfs/list":
                 root = rp["path"].rstrip("/")
-                items = []
+                yroot = to_ya(root)
+                if yroot in S.ya:          # список по пути файла — сам файл (так берутся превью)
+                    port = self.server.server_address[1]
+                    url = f"//127.0.0.1:{port}/preview?" + urllib.parse.urlencode({"p": yroot})
+                    return self.send_json(200, [{"path": root, "type": "file", "name": root.rsplit("/", 1)[-1],
+                                                 "meta": {"sizes": [{"name": "DEFAULT", "url": url},
+                                                                    {"name": "XXXL", "url": url}]}}])
+                pref = yroot.rstrip("/") + "/"
+                items, dirs = [], set()
                 for p, d in sorted(S.ya.items()):
-                    if p.startswith("photounlim:/"):
-                        name = p.split(":/", 1)[1]
-                        items.append({"path": "/photounlim/" + name, "name": name, "type": "file",
-                                      "ctime": 1556964000, "mtime": 1556964000,
-                                      "meta": {"size": len(d), "md5": md5(d), "mimetype": "image/jpeg",
-                                               "mediatype": "image"}})
+                    if not p.startswith(pref):
+                        continue
+                    rest = p[len(pref):]
+                    if "/" in rest:
+                        dirs.add(rest.split("/")[0])
+                        continue
+                    items.append({"path": root + "/" + rest, "name": rest, "type": "file",
+                                  "ctime": 1556964000, "mtime": 1556964000,
+                                  "meta": {"size": len(d), "md5": md5(d), "mimetype": "image/jpeg",
+                                           "mediatype": "image"}})
+                items = [{"path": f"{root}/{x}", "name": x, "type": "dir"} for x in sorted(dirs)] + items
                 off, amount = int(rp.get("offset", 0)), int(rp.get("amount", 40))
                 return self.send_json(200, [{"path": root, "type": "dir"}] + items[off:off + amount])
             if m == "mpfs/url":
                 p = rp["path"]
-                yp = "photounlim:/" + p[len("/photounlim/"):]
+                yp = to_ya(p)
                 if yp not in S.ya:
                     return self.send_json(200, {"error": {"id": "resource not found"}})
                 S.calls["mpfs_url"] += 1
@@ -352,7 +413,10 @@ class H(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------ control (для тестов)
     def control(self, method, u):
         if u.path == "/ctl/faults":
-            S.faults.update(json.loads(self.body()))
+            body = json.loads(self.body())
+            if body.pop("reset_parallel", False):
+                S.calls["max_parallel_dl"] = S.parallel
+            S.faults.update(body)
             return self.send_json(200, S.faults)
         if u.path == "/ctl/drive":
             out = {}
@@ -382,6 +446,8 @@ class H(BaseHTTPRequestHandler):
             return self.downloader(qs)
         if u.path == "/st":
             return self.dl(qs)
+        if u.path == "/preview":
+            return self.preview(qs)
         if u.path.startswith("/web/") or u.path.startswith("/passport."):
             return self.web(method, u, qs)
         if u.path.startswith("/g/"):
@@ -401,6 +467,14 @@ class H(BaseHTTPRequestHandler):
         self.route("DELETE")
 
 
+def to_ya(p):
+    """/photounlim/a → photounlim:/a, /disk/A/b → disk:/A/b"""
+    for root, pref in (("/photounlim", "photounlim:/"), ("/disk", "disk:/")):
+        if p == root or p.startswith(root + "/"):
+            return pref + p[len(root):].lstrip("/")
+    return p
+
+
 def start(port=0):
     srv = ThreadingHTTPServer(("127.0.0.1", port), H)
     srv.daemon_threads = True
@@ -412,6 +486,7 @@ def env_for(port):
     b = f"http://127.0.0.1:{port}"
     return {"YA2GD_YANDEX_API": b + "/ya/v1/disk", "YA2GD_YANDEX_WEB": b + "/web",
             "YA2GD_STORAGE_TIMEOUT": "1", "YA2GD_DEAD_HOST_TTL": "4", "YA2GD_GOOGLE_TOKEN": b + "/g/token",
+            "YA2GD_YANDEX_INTERVAL": "0.01", "YA2GD_YA_COOLDOWN": "1", "YA2GD_GROW_EVERY": "2",
             "YA2GD_GOOGLE_AUTH": b + "/g/auth", "YA2GD_GOOGLE_API": b + "/g/drive/v3",
             "YA2GD_GOOGLE_UPLOAD": b + "/g/upload/drive/v3"}
 

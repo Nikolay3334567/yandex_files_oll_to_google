@@ -1,0 +1,142 @@
+"""Быстрые проверки отдельных частей без сети. Запуск: python tests/test_unit.py"""
+import json
+import os
+import shutil
+import sys
+import tempfile
+import threading
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+
+from ya2gd import throttle  # noqa: E402
+from ya2gd.core import Settings  # noqa: E402
+from ya2gd.db import DB  # noqa: E402
+from ya2gd.engine import MemQueue, drive_dir_for, is_media, name_date  # noqa: E402
+from ya2gd.yaweb import from_mpfs, parse_cookies, to_mpfs  # noqa: E402
+
+
+def test_gate():
+    throttle.GROW_EVERY = 0.05
+    g = throttle.AdaptiveGate(6, start=3)
+    stop = threading.Event()
+    assert g.state()["limit"] == 3
+    for _ in range(3):
+        assert g.acquire(stop)
+    g.tick(has_backlog=True)            # рано: с последнего изменения прошло мало
+    assert g.state()["limit"] == 3
+    time.sleep(0.06)
+    g.tick(has_backlog=False)           # работы нет — не растём
+    assert g.state()["limit"] == 3
+    g.tick(has_backlog=True)
+    assert g.state()["limit"] == 4, g.state()
+    g.throttled()
+    assert g.state()["limit"] == 2
+    for _ in range(3):
+        g.error()
+    assert g.state()["limit"] == 1
+    for _ in range(3):
+        g.release()
+    # при лимите 1 второй поток ждёт, пока первый не освободит место
+    assert g.acquire(stop)
+    got = []
+    t = threading.Thread(target=lambda: got.append(g.acquire(stop)))
+    t.start()
+    time.sleep(0.2)
+    assert not got
+    g.release()
+    t.join(3)
+    assert got == [True]
+    g.configure(5, adaptive=False)
+    assert g.state()["limit"] == 5
+    print("OK автоподбор потоков к Яндексу: растёт по одному, при 429 — вдвое меньше, при сбоях — минус один")
+
+
+def test_settings_migration():
+    d = tempfile.mkdtemp()
+    try:
+        p = os.path.join(d, "settings.json")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump({"drive_root": "Yandex Disk", "photounlim_folder": "Фото (безлимит)",
+                       "photounlim_split": "year", "workers": 8, "yandex_token": "t"}, f)
+        s = Settings(p)
+        assert s.migrated
+        assert s["files_root"] == "Yandex Disk" and s["photos_root"] == "Yandex Disk/Фото (безлимит)"
+        assert s["photos_split"] == "year" and s["yandex_streams_max"] == 8 and s["yandex_token"] == "t"
+        s.update(photos_root=" Архив \\ Фото/ ", buffer_gb="25", yandex_streams_max=99)
+        assert s["photos_root"] == "Архив/Фото" and s["buffer_gb"] == 25 and s["yandex_streams_max"] == 16
+        s2 = Settings(p)
+        assert not s2.migrated and s2["photos_root"] == "Архив/Фото"
+        print("OK настройки прежней версии переносятся, папки на Drive остаются прежними")
+    finally:
+        shutil.rmtree(d)
+
+
+def test_layout():
+    s = {"photos_root": "Фото", "files_root": "Файлы с Яндекс Диска", "photos_split": "month"}
+    row = {"path": "photounlim:/2019-05-04 10-00-00.JPG", "source": "photounlim", "name": "2019-05-04 10-00-00.JPG"}
+    assert drive_dir_for(row, s) == "Фото/2019/2019-05"
+    row = {"path": "photounlim:/x.jpg", "source": "photounlim", "name": "x.jpg", "taken": "2021-03-01T10:00:00+00:00"}
+    assert drive_dir_for(row, s) == "Фото/2021/2021-03"
+    row = {"path": "photounlim:/x.jpg", "source": "photounlim", "name": "x.jpg"}
+    assert drive_dir_for(row, s) == "Фото"
+    assert drive_dir_for(row, dict(s, photos_split="none")) == "Фото"
+    row = {"path": "disk:/Документы/2020/отчёт.pdf", "source": "disk", "name": "отчёт.pdf"}
+    assert drive_dir_for(row, s) == "Файлы с Яндекс Диска/Документы/2020"
+    row = {"path": "disk:/корень.txt", "source": "disk", "name": "корень.txt"}
+    assert drive_dir_for(row, s) == "Файлы с Яндекс Диска"
+    assert name_date("IMG_20190504_101010.jpg") == "2019-05-04"
+    assert is_media({"name": "VID.MOV"}) and not is_media({"name": "a.pdf", "mime": "application/pdf"})
+    assert to_mpfs("disk:/A/b.txt") == "/disk/A/b.txt" and from_mpfs("/disk/A/b.txt") == "disk:/A/b.txt"
+    assert to_mpfs("photounlim:/a.jpg") == "/photounlim/a.jpg" and from_mpfs("/photounlim/a.jpg") == "photounlim:/a.jpg"
+    assert parse_cookies("Cookie: a=1; b=2") == {"a": "1", "b": "2"}
+    print("OK раскладка: «Фото/год/год-месяц» и «Файлы с Яндекс Диска/<те же папки>»")
+
+
+def test_memqueue():
+    q = MemQueue(100)
+    stop = threading.Event()
+    assert q.put("a", 60, stop) and q.put("b", 40, stop)
+    t = threading.Thread(target=lambda: q.put("c", 50, stop))
+    t.start()
+    time.sleep(0.2)
+    assert len(q) == 2                   # «c» ждёт, пока освободится место
+    assert q.get() == "a"
+    t.join(2)
+    assert len(q) == 2 and q.get() == "b" and q.get() == "c" and q.get() is None
+    assert q.put("big", 500, stop)       # больше лимита, но очередь пуста — берём
+    print("OK очередь в памяти ограничена по объёму")
+
+
+def test_db_claims():
+    d = tempfile.mkdtemp()
+    try:
+        db = DB(os.path.join(d, "s.sqlite3"))
+        items = [{"path": f"disk:/f{i}", "source": "disk", "name": f"f{i}", "size": sz, "md5": None}
+                 for i, sz in enumerate([500, 10, 3000])]
+        items.append({"path": "photounlim:/p.jpg", "source": "photounlim", "name": "p.jpg", "size": 50})
+        db.upsert_files(items, 1)
+        r = db.claim_download(order="photos_first")
+        assert r["path"] == "photounlim:/p.jpg"
+        r = db.claim_download(order="small_first")
+        assert r["size"] == 10
+        # буфер: свободно 600, размер буфера 1000 → 3000 > буфера идёт напрямую, 500 влезает
+        r = db.claim_download(order="as_listed", fits=(600, 1000))
+        assert r["size"] == 500
+        r = db.claim_download(order="as_listed", fits=(0, 1000))
+        assert r["size"] == 3000
+        assert db.claim_download() is None
+        assert db.reset_active() == 4 and db.count_status("pending") == 4
+        print("OK очередь: сначала «Фото», маленькие/по порядку, учёт места в буфере")
+    finally:
+        shutil.rmtree(d)
+
+
+if __name__ == "__main__":
+    test_gate()
+    test_settings_migration()
+    test_layout()
+    test_memqueue()
+    test_db_claims()
+    print("\nМОДУЛЬНЫЕ ПРОВЕРКИ ПРОЙДЕНЫ")

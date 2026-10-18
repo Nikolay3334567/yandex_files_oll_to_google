@@ -1,11 +1,12 @@
-"""Скачивание файла с серверов хранения Яндекса (общая часть для API и раздела «Фото»).
+"""Скачивание файла с серверов хранения Яндекса (общая часть для API и веб-версии).
 
 Ссылка Яндекса (downloader.disk.yandex.ru) ведёт редиректом на конкретный сервер
 хранения (sNNN.storage.yandex.net). С октября 2026 часть таких серверов не отвечает
 ни API, ни веб-версии; файлы при этом не удалены. Поэтому редирект разбирается вручную:
 - сервер, который недавно молчал, пропускается сразу;
 - новый молчащий сервер распознаётся за STORAGE_TIMEOUT секунд, а не за минуты;
-- файл в таком случае откладывается (StorageDown), а не считается ошибкой.
+- файл в таком случае откладывается (StorageDown), а не считается ошибкой;
+- 502/504/410 («не смог достать файл») — тоже откладывание, а не ошибка.
 """
 import os
 import threading
@@ -19,13 +20,14 @@ DEAD_HOST_TTL = float(os.environ.get("YA2GD_DEAD_HOST_TTL", "1800"))
 STREAM_READ_TIMEOUT = float(os.environ.get("YA2GD_STREAM_TIMEOUT", "30"))
 _REDIRECTS = (301, 302, 303, 307, 308)
 _PAGE_TYPES = ("text/html", "application/json")
+YANDEX_HOSTS = (".yandex.ru", ".yandex.net", ".yandex.com", ".yandex-team.ru")
 
 
 class StorageDown(ApiError):
-    """Сервер хранения Яндекса не отвечает — файл отложить, попытку не тратить."""
+    """Яндекс сейчас не может отдать файл (сервер хранения молчит) — отложить, попытку не тратить."""
 
     def __init__(self, host, msg):
-        super().__init__(msg, retryable=False)
+        super().__init__(msg, retryable=False, service="yandex")
         self.host = host
 
 
@@ -62,6 +64,11 @@ class DeadHosts:
 DEAD = DeadHosts()
 
 
+def is_yandex_host(url):
+    host = (urlsplit(url).hostname or "").lower()
+    return host == "localhost" or host.startswith("127.") or any(host.endswith(d) for d in YANDEX_HOSTS)
+
+
 def open_download(url, offset=0, sess=None, reject_pages=False):
     """Открывает поток файла с байта offset. Возвращает (response, фактическое_смещение).
 
@@ -92,7 +99,7 @@ def open_download(url, offset=0, sess=None, reject_pages=False):
             DEAD.mark(host)
             raise StorageDown(host, f"сервер хранения Яндекса {host} не отвечает ({type(e).__name__}) — "
                                     f"файл отложен, повтор через {int(DEAD_HOST_TTL // 60)} мин")
-        raise ApiError(f"Яндекс: сеть при получении файла: {e}", retryable=True)
+        raise ApiError(f"Яндекс: сеть при получении файла: {e}", retryable=True, service="yandex")
 
     code = r.status_code
     if code in (200, 206):
@@ -101,7 +108,7 @@ def open_download(url, offset=0, sess=None, reject_pages=False):
             snippet = r.raw.read(300)
             r.close()
             raise ApiError(f"Яндекс вместо файла прислал {ctype.split(';')[0]}: "
-                           f"{snippet[:200].decode('utf-8', 'replace')!r}", retryable=True)
+                           f"{snippet[:200].decode('utf-8', 'replace')!r}", retryable=True, service="yandex")
         return r, (offset if code == 206 else 0)
     text = ""
     try:
@@ -109,14 +116,34 @@ def open_download(url, offset=0, sess=None, reject_pages=False):
     except Exception:  # noqa
         pass
     r.close()
+    where = f"сервер {host}" if host else "Яндекс"
     if code == 429:
-        raise RateLimited("Яндекс: слишком частые скачивания (429)", status=429, retryable=True)
+        raise RateLimited("Яндекс: слишком частые скачивания (429)", status=429, retryable=True, service="yandex")
     if code == 404:
-        raise ApiError("Яндекс: файл не найден при скачивании (удалён?)", status=404)
+        raise ApiError("Яндекс: файл не найден при скачивании (удалён?)", status=404, service="yandex")
     if code == 416:
-        raise ApiError("Яндекс: неверный диапазон (файл изменился?)", status=416)
-    if code >= 500 and host:
-        raise ApiError(f"Сервер хранения {host}: HTTP {code}", status=code, retryable=True)
-    raise ApiError(f"Яндекс: скачивание HTTP {code}: {text}", status=code,
-                   retryable=code >= 500 or code in (401, 403, 410))
+        raise ApiError("Яндекс: неверный диапазон (файл изменился?)", status=416, service="yandex")
+    if code in (410, 502, 504):
+        raise StorageDown(None, f"{where}: HTTP {code} — Яндекс сейчас не может достать файл, файл отложен")
+    raise ApiError(f"{where}: скачивание HTTP {code}: {text}", status=code,
+                   retryable=code >= 500 or code in (401, 403), service="yandex")
 
+
+def fetch_small(url, sess=None, headers=None, limit=50 * 2 ** 20):
+    """Скачивает небольшой ресурс (превью) целиком: (bytes, content-type)."""
+    s = sess or session()
+    try:
+        r = s.get(url, headers=headers or {}, timeout=(STORAGE_TIMEOUT, 60), stream=True)
+    except NETWORK_ERRORS as e:
+        raise ApiError(f"превью: сеть: {e}", retryable=True, service="yandex")
+    try:
+        if r.status_code != 200:
+            raise ApiError(f"превью: HTTP {r.status_code}", status=r.status_code, service="yandex")
+        data = r.raw.read(limit + 1, decode_content=True)
+        if len(data) > limit:
+            raise ApiError("превью слишком большое", service="yandex")
+        return data, (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+    except NETWORK_ERRORS as e:
+        raise ApiError(f"превью: обрыв: {e}", retryable=True, service="yandex")
+    finally:
+        r.close()

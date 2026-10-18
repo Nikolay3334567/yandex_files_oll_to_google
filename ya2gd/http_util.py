@@ -1,4 +1,4 @@
-"""Общие штуки для HTTP: сессии на поток, ошибки, повторы с паузой."""
+"""Общие штуки для HTTP: сессии на поток, ошибки, повторы с паузой, ограничитель частоты."""
 import os
 import random
 import threading
@@ -17,17 +17,20 @@ def session():
     s = getattr(_local, "s", None)
     if s is None:
         s = requests.Session()
-        s.headers["User-Agent"] = "ya2gd/1.0"
+        s.headers["User-Agent"] = "ya2gd/2.0"
         _local.s = s
     return s
 
 
 class ApiError(Exception):
-    def __init__(self, msg, status=None, retryable=False, body=None):
+    """service: 'yandex' | 'google' | None — чтобы притормаживать именно ту сторону, что просит."""
+
+    def __init__(self, msg, status=None, retryable=False, body=None, service=None):
         super().__init__(msg)
         self.status = status
         self.retryable = retryable
         self.body = body
+        self.service = service
 
 
 class AuthError(ApiError):
@@ -35,7 +38,7 @@ class AuthError(ApiError):
 
 
 class WebAuthError(ApiError):
-    """Куки веб-версии Яндекса (раздел «Фото») недействительны. Останавливает только этот раздел."""
+    """Куки веб-версии Яндекса недействительны. Останавливает только то, что идёт через веб-версию."""
 
 
 class FatalPause(ApiError):
@@ -44,6 +47,10 @@ class FatalPause(ApiError):
 
 class RateLimited(ApiError):
     """Сервис просит притормозить."""
+
+
+class LocalDiskError(ApiError):
+    """Буфер на диске компьютера недоступен или переполнен — это не сеть, повторять бесполезно."""
 
 
 NETWORK_ERRORS = (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError,
@@ -64,3 +71,21 @@ def sleep_interruptible(seconds, stop_event=None):
 
 def env_url(name, default):
     return os.environ.get(name, default).rstrip("/")
+
+
+class RateLimiter:
+    """Не чаще одного запроса в interval секунд на весь процесс (запросы равномерно растягиваются)."""
+
+    def __init__(self, interval):
+        self.interval = interval
+        self._next = 0.0
+        self._lock = threading.Lock()
+
+    def wait(self, stop_event=None):
+        with self._lock:
+            now = time.time()
+            slot = max(now, self._next)
+            self._next = slot + self.interval
+        delay = slot - now
+        if delay > 0:
+            sleep_interruptible(delay, stop_event)

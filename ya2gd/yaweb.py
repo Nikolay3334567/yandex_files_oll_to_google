@@ -1,10 +1,14 @@
-"""Доступ к разделу «Фото» (безлимитная автозагрузка) через веб-API Яндекс Диска.
+"""Доступ к Яндекс Диску через веб-API (как у сайта disk.yandex.ru).
 
-Публичный REST API эти файлы не отдаёт. Веб-версия Диска (disk.yandex.ru) получает их так:
+Нужен для раздела «Фото» (безлимитная автозагрузка): публичный REST API эти файлы не отдаёт.
+И как запасной канал для «Файлов»: с октября 2026 REST API у части людей отвечает 410 Gone
+на чтение папок, а сайт продолжает работать. Веб-версия Диска получает файлы так:
 - POST /models-v2?m=mpfs/list  {path: "/photounlim", offset, amount, meta: "size,md5,..."}
   — плоский список всех файлов раздела постранично, с размером и MD5;
-- POST /models-v2?m=mpfs/url   {path: "/photounlim/<имя>"}
+- POST /models-v2?m=mpfs/url   {path: "/photounlim/<имя>" или "/disk/<путь>"}
   — одноразовая прямая ссылка на оригинал (так работает кнопка «Скачать»).
+  Яндекс отключил на сайте скачивание папок и нескольких файлов сразу, но ссылка
+  на один файл выдаётся — программа и качает строго по одному файлу.
 Авторизация — куки вашей сессии в браузере (Session_id, sessionid2, yandexuid) и
 CSRF-токен sk со страницы /client/disk. Способ неофициальный: так же работает открытый
 проект github.com/PXSYS13/yadisk_backup.
@@ -18,14 +22,17 @@ from urllib.parse import urlsplit
 
 import requests
 
+from .fetch import fetch_small
 from .http_util import (ApiError, NETWORK_ERRORS, RateLimited, WebAuthError, backoff, env_url)
+from .yandex import PREVIEW_SIZES, looks_like_image
 
 BASE = env_url("YA2GD_YANDEX_WEB", "https://disk.yandex.ru")
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
 REQUIRED = ("Session_id", "sessionid2", "yandexuid")
 UNLIM_ROOT = "/photounlim"
-LIST_META = "size,md5,mimetype,mediatype"
+DISK_ROOT = "/disk"
+LIST_META = "size,md5,mimetype,mediatype,etime"
 _tls = threading.local()       # одна HTTP-сессия на поток (переиспользует соединения)
 MIN_INTERVAL = 0.12          # не чаще ~8 запросов к веб-API в секунду на всю программу
 
@@ -54,13 +61,19 @@ def parse_cookies(text):
 
 
 def to_mpfs(path):
-    """photounlim:/a.jpg → /photounlim/a.jpg"""
-    return UNLIM_ROOT + "/" + path.split(":", 1)[1].lstrip("/") if path.startswith("photounlim:") else path
+    """photounlim:/a.jpg → /photounlim/a.jpg;  disk:/A/b.txt → /disk/A/b.txt"""
+    for pref, root in (("photounlim:", UNLIM_ROOT), ("disk:", DISK_ROOT)):
+        if path.startswith(pref):
+            return root + "/" + path.split(":", 1)[1].lstrip("/")
+    return path
 
 
 def from_mpfs(path):
-    """/photounlim/a.jpg → photounlim:/a.jpg"""
-    return "photounlim:/" + path[len(UNLIM_ROOT):].lstrip("/") if path.startswith(UNLIM_ROOT + "/") else path
+    """/photounlim/a.jpg → photounlim:/a.jpg;  /disk/A/b.txt → disk:/A/b.txt"""
+    for pref, root in (("photounlim:/", UNLIM_ROOT), ("disk:/", DISK_ROOT)):
+        if path.startswith(root + "/"):
+            return pref + path[len(root):].lstrip("/")
+    return path
 
 
 def norm_item(it):
@@ -74,7 +87,7 @@ def norm_item(it):
         except (TypeError, ValueError):
             return None
     return {
-        "path": path, "source": "photounlim", "name": name,
+        "path": path, "source": "photounlim" if path.startswith("photounlim:") else "disk", "name": name,
         "size": int(meta.get("size") or 0), "md5": meta.get("md5"), "sha256": None,
         "modified": iso(it.get("mtime")), "created": iso(it.get("ctime")),
         "taken": iso(meta.get("etime")) if meta.get("etime") else None,
@@ -208,9 +221,9 @@ class YandexWeb:
         raise last or ApiError(f"Яндекс (веб) {method}: не удалось")
 
     # ---------------------------------------------------------------- методы
-    def list_page(self, path=UNLIM_ROOT, offset=0, amount=1000):
+    def list_page(self, path=UNLIM_ROOT, offset=0, amount=1000, meta=LIST_META):
         """(files, subdirs, raw_count) — одна страница плоского списка папки."""
-        data = self.call("mpfs/list", {"path": path, "amount": amount, "offset": offset, "meta": LIST_META})
+        data = self.call("mpfs/list", {"path": path, "amount": amount, "offset": offset, "meta": meta})
         if not isinstance(data, list):
             raise ApiError(f"mpfs/list: неожиданный ответ {str(data)[:200]}")
         children = [x for x in data if (x.get("path") or "").rstrip("/") != path.rstrip("/")]
@@ -224,6 +237,35 @@ class YandexWeb:
         if not url:
             raise ApiError(f"Яндекс не выдал ссылку на файл: {str(data)[:200]}", retryable=True)
         return "https:" + url if url.startswith("//") else url
+
+    def preview(self, path):
+        """Самое крупное доступное превью файла: (bytes, content-type, размер).
+
+        Веб-версия отдаёт ссылки на превью в meta.sizes (имена XXXL…S) — как в просмотрщике фото.
+        """
+        mp = to_mpfs(path)
+        data = self.call("mpfs/list", {"path": mp, "amount": 1, "offset": 0, "meta": "sizes"}, tries=2)
+        items = data if isinstance(data, list) else [data]
+        sizes = []
+        for it in items:
+            if isinstance(it, dict) and (it.get("path") or "").rstrip("/") == mp.rstrip("/"):
+                sizes = (it.get("meta") or {}).get("sizes") or []
+        by_name = {s.get("name"): s.get("url") for s in sizes if isinstance(s, dict) and s.get("url")}
+        last = ApiError("веб-версия не дала ссылок на превью")
+        for name in PREVIEW_SIZES + ("DEFAULT",):
+            url = by_name.get(name)
+            if not url:
+                continue
+            url = "https:" + url if url.startswith("//") else url
+            try:
+                body, ctype = fetch_small(url, sess=self.session())
+            except ApiError as e:
+                last = e
+                continue
+            if looks_like_image(body, ctype):
+                return body, ctype, name
+            last = ApiError(f"превью {name}: пришло не изображение ({ctype})")
+        raise last
 
     def check(self):
         sk, uid = self._auth(force=True)
