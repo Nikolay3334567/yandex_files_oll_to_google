@@ -8,6 +8,10 @@ import threading
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")     # консоль Windows в CI — cp1252
+except AttributeError:
+    pass
 sys.path.insert(0, ROOT)
 
 from ya2gd import throttle  # noqa: E402
