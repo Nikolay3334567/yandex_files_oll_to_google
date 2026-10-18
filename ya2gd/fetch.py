@@ -98,7 +98,7 @@ def open_download(url, offset=0, sess=None, reject_pages=False):
         if host:
             DEAD.mark(host)
             raise StorageDown(host, f"сервер хранения Яндекса {host} не отвечает ({type(e).__name__}) — "
-                                    f"файл отложен, повтор через {int(DEAD_HOST_TTL // 60)} мин")
+                                    f"файл отложен")
         raise ApiError(f"Яндекс: сеть при получении файла: {e}", retryable=True, service="yandex")
 
     code = r.status_code

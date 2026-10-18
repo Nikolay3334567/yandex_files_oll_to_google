@@ -245,7 +245,7 @@ def scenario_web(e):
     app, M = e.app, e.M
     app.start()
     dead = "disk:/Фотокамера/IMG_0002.jpg"
-    e.faults(pu_hidden=True, dead=[dead], g_lost=0.3, g_500=0.05)
+    e.faults(pu_hidden=True, dead=[dead], g_lost=0.3, g_500=0.05, lose_once=["IMG_0002.jpg (превью"])
     app.post("/api/settings", dict(GOOD, yandex_streams_max=4))
     code, r = app.post("/api/yandex/test")
     assert code == 200 and not r["photounlim_rest"] and r["photounlim_size"] > 0, r
@@ -284,7 +284,8 @@ def scenario_web(e):
     it = app.get("/api/files?q=IMG_0002")["items"][0]
     assert it["status"] == "done" and it["attempts"] == 0 and not it["preview_id"], it
     assert it_preview_gone(e, prev["name"]), "превью не удалено после переноса оригинала"
-    print("OK сервер ожил — оригинал перенесён сам, временное превью удалено")
+    print("OK сервер ожил — оригинал перенесён сам, временное превью удалено "
+          "(в том числе когда Google «потерял» ответ на загрузку превью)")
     check(app, M)
     calls = e.stats()
     assert calls["mpfs_url"] >= 3 and calls["small_uploads"] > 0, calls

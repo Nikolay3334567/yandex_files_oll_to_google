@@ -372,6 +372,10 @@ class H(BaseHTTPRequestHandler):
                 data = parts[2].split(b"\r\n\r\n", 1)[1][:-2]
                 fid = self.new_file(meta, data)
                 S.calls["small_uploads"] += 1
+                once = [x for x in S.faults.get("lose_once", []) if x in meta["name"]]
+                if once:                   # «потерять» ответ на первую загрузку файла с таким именем
+                    S.faults["lose_once"] = [x for x in S.faults["lose_once"] if x not in once]
+                    return self.send_json(503, {"error": {"code": 503, "message": "lost"}})
                 if random.random() < S.faults.get("g_lost", 0):
                     # файл создан, но ответ «потерялся» — клиент не должен залить дубль
                     return self.send_json(503, {"error": {"code": 503, "message": "lost"}})

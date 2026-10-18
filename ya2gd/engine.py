@@ -1483,9 +1483,17 @@ class Engine:
             name = f"{row['name']} (превью {size}){ext}"
             drive = self.drive(self.stop_transfer)
             parent = drive.ensure_folder(f"{s['previews_root']}/{drive_dir_for(row, s)}")
-            f = drive.upload_small(name, parent, body, ctype if ctype.startswith("image/") else "image/jpeg",
-                                   {APP_PROP: "preview"})
-            self.db.update_file(row["id"], preview_id=f["id"],
+            fid = self._preview_on_drive(drive, parent, name)
+            if not fid:
+                try:
+                    fid = drive.upload_small(name, parent, body, ctype if ctype.startswith("image/") else "image/jpeg",
+                                             {APP_PROP: "preview"})["id"]
+                except (ApiError, *NETWORK_ERRORS):
+                    # ответ Google мог потеряться уже после создания файла — тогда превью уже лежит на Drive
+                    fid = self._preview_on_drive(drive, parent, name)
+                    if not fid:
+                        raise
+            self.db.update_file(row["id"], preview_id=fid,
                                 note="оригинал пока недоступен — сохранено превью, оригинал продолжаю ждать")
             self.log(f"«{row['name']}»: оригинал не отдаётся — сохранено превью {size} "
                      f"({len(body) // 1024} КБ) в «{s['previews_root']}». Оригинал продолжаю ждать.", "warn")
@@ -1493,6 +1501,14 @@ class Engine:
         except Exception as e:  # noqa
             self.log(f"«{row['name']}»: превью тоже не получить ({e})", "warn")
             return False
+
+    @staticmethod
+    def _preview_on_drive(drive, parent, name):
+        """id уже сохранённого превью с таким именем (лишние копии удаляются) или None."""
+        found = drive.find_in_parent(parent, name)
+        for extra in found[1:]:
+            drive.delete(extra["id"])
+        return found[0]["id"] if found else None
 
     # ================================================================== служебные операции
     def busy(self):
