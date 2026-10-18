@@ -74,7 +74,7 @@ def test_settings_migration():
         assert not s2.migrated and s2["photos_root"] == "Архив/Фото"
         print("OK настройки прежней версии переносятся, папки на Drive остаются прежними")
     finally:
-        shutil.rmtree(d)
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def test_layout():
@@ -132,9 +132,10 @@ def test_db_claims():
         assert r["size"] == 3000
         assert db.claim_download() is None
         assert db.reset_active() == 4 and db.count_status("pending") == 4
+        db.close()                       # Windows не даёт удалить открытый файл базы
         print("OK очередь: сначала «Фото», маленькие/по порядку, учёт места в буфере")
     finally:
-        shutil.rmtree(d)
+        shutil.rmtree(d, ignore_errors=True)
 
 
 if __name__ == "__main__":

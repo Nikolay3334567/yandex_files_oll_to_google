@@ -95,6 +95,10 @@ class DB:
             self.conn.execute("DELETE FROM folders")
             self.set("folders.v", 2)
 
+    def close(self):
+        with self._lock:
+            self.conn.close()
+
     # ---------- низкоуровневое ----------
     def q(self, sql, args=()):
         with self._lock:
