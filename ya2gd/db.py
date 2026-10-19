@@ -62,14 +62,17 @@ EXTRA_COLS = {
     "preview_id": "TEXT",                    # id превью на Drive, пока оригинал недоступен
     "done_at": "REAL",
     "uploaded": "INTEGER NOT NULL DEFAULT 0",  # байт реально залито в Google (для суточного лимита)
+    "section": "INTEGER NOT NULL DEFAULT 0",   # 1 — идёт в папку «Фото», 0 — в «Файлы» (engine.goes_to_photos)
 }
 
 FILE_COLS = ("path", "source", "name", "size", "md5", "sha256", "modified",
-             "created", "taken", "mime", "media_type")
+             "created", "taken", "mime", "media_type", "section")
 
+# Раздел хранится готовым числом (section), а не вычисляется на каждый выбор файла:
+# на сотнях тысяч строк вычисляемое условие делало выбор следующего файла в 20 раз медленнее.
 ORDERS = {
-    "photos_first": "(NOT {photos}), id",
-    "files_first": "({photos}), id",
+    "photos_first": "section DESC, id",
+    "files_first": "section, id",
     "small_first": "size, id",
     "as_listed": "id",
 }
@@ -90,6 +93,7 @@ class DB:
             if c not in cols:
                 self.conn.execute(f"ALTER TABLE files ADD COLUMN {c} {t}")
         self.conn.execute("CREATE INDEX IF NOT EXISTS files_status ON files(status, next_try, id)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS files_section ON files(status, section, id)")
         if self.get("folders.v") != "2":
             # версия 1 хранила пути папок относительно корня — кэш просто строится заново
             self.conn.execute("DELETE FROM folders")
@@ -133,6 +137,9 @@ class DB:
             self.conn.execute("BEGIN")
             try:
                 for it in items:
+                    it = dict(it)
+                    if it.get("section") is None:     # раздел обычно считает engine; иначе безлимит — в «Фото»
+                        it["section"] = 1 if it.get("source") == "photounlim" else 0
                     vals = [it.get(c) for c in FILE_COLS]
                     self.conn.execute(
                         f"""INSERT INTO files({",".join(FILE_COLS)}, seen_scan, updated)
@@ -145,7 +152,7 @@ class DB:
                               size=excluded.size, md5=COALESCE(excluded.md5, files.md5), sha256=excluded.sha256,
                               modified=excluded.modified, created=excluded.created,
                               taken=COALESCE(excluded.taken, files.taken), mime=excluded.mime,
-                              media_type=excluded.media_type, name=excluded.name,
+                              media_type=excluded.media_type, name=excluded.name, section=excluded.section,
                               seen_scan=excluded.seen_scan""",
                         vals + [scan_id, now])
                 self.conn.execute("COMMIT")
@@ -165,8 +172,7 @@ class DB:
         st = "(status='pending' OR status='error')" if retry_errors else "status='pending'"
         return f"{st} AND next_try<=?{ex}", args
 
-    def claim_download(self, excluded=(), order="photos_first", fits=None, retry_errors=True,
-                       photos_cond="source='photounlim'"):
+    def claim_download(self, excluded=(), order="photos_first", fits=None, retry_errors=True):
         """Атомарно забирает следующий файл для скачивания с Яндекса.
 
         fits=(свободно_в_буфере, размер_буфера): брать только то, что влезет в буфер сейчас,
@@ -182,8 +188,7 @@ class DB:
         with self._lock:
             row = self.conn.execute(
                 f"SELECT * FROM files WHERE {cond} "
-                f"ORDER BY (local_path IS NULL AND upload_uri IS NULL), "
-                f"{ORDERS.get(order, 'id').format(photos=photos_cond)} LIMIT 1",
+                f"ORDER BY (local_path IS NULL AND upload_uri IS NULL), {ORDERS.get(order, 'id')} LIMIT 1",
                 [now] + args).fetchone()
             if row is None:
                 return None
@@ -233,6 +238,10 @@ class DB:
         r = self.q1(f"SELECT MIN(next_try) FROM files WHERE {cond}", [FOREVER] + args)
         return r[0] if r else None
 
+    def recompute_sections(self, photos_cond):
+        """Пересчитать раздел всех файлов по правилу (один проход — при смене настройки)."""
+        return self.x(f"UPDATE files SET section = CASE WHEN {photos_cond} THEN 1 ELSE 0 END")
+
     def update_file(self, fid, **kw):
         kw["updated"] = time.time()
         cols = ", ".join(f"{k}=?" for k in kw)
@@ -249,8 +258,7 @@ class DB:
         """Сколько байт буфера занято или обещано (каждый файл в буфере резервирует свой полный размер)."""
         return self.q1("SELECT IFNULL(SUM(size),0) FROM files WHERE local_path IS NOT NULL")[0]
 
-    def stats(self, photos_cond="source='photounlim'"):
-        """photos_cond — SQL-условие «файл идёт в папку «Фото»» (см. engine.photos_sql)."""
+    def stats(self):
         now = time.time()
         rows = self.q("SELECT status, COUNT(*) n, IFNULL(SUM(size),0) s FROM files GROUP BY status")
         out = {r["status"]: {"count": r["n"], "bytes": r["s"]} for r in rows}
@@ -262,8 +270,8 @@ class DB:
         prev = self.q1("SELECT COUNT(*) FROM files WHERE preview_id IS NOT NULL AND status!='done'")[0]
         day = self.q1("SELECT IFNULL(SUM(uploaded),0) FROM files WHERE done_at>?", (now - 86400,))[0]
         src = {}
-        for r in self.q(f"SELECT CASE WHEN {photos_cond} THEN 'photos' ELSE 'files' END sec, status, "
-                        f"COUNT(*) n, IFNULL(SUM(size),0) s FROM files GROUP BY sec, status"):
+        for r in self.q("SELECT CASE WHEN section THEN 'photos' ELSE 'files' END sec, status, "
+                        "COUNT(*) n, IFNULL(SUM(size),0) s FROM files GROUP BY sec, status"):
             d = src.setdefault(r["sec"], {"count": 0, "bytes": 0, "done": 0, "done_bytes": 0})
             d["count"] += r["n"]
             d["bytes"] += r["s"]

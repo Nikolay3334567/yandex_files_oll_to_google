@@ -127,6 +127,7 @@ class Handler(BaseHTTPRequestHandler):
                 if "google_client_id" in clean and clean["google_client_id"] != e.settings["google_client_id"]:
                     clean.setdefault("google_refresh_token", "")
                 e.settings.update(**clean)
+                e.sync_sections()
                 if "win_autorun" in clean:
                     winsys.set_autorun(e.settings["win_autorun"])
                 return self._send(200, e.settings.public())

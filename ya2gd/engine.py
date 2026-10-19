@@ -285,6 +285,16 @@ class Buffer:
             return []
 
 
+def _date_of(v):
+    """Дата 'ГГГГ-ММ-ДД' из строки ISO или секунд/миллисекунд Unix; None, если не разобрать."""
+    if v in (None, ""):
+        return None
+    if isinstance(v, (int, float)):
+        return time.strftime("%Y-%m-%d", time.gmtime(v / 1000 if v > 1e12 else v))
+    m = re.match(r"\d{4}-\d\d-\d\d", str(v))
+    return m.group(0) if m else None
+
+
 def _dur(sec):
     sec = max(0, sec)
     if sec < 120:
@@ -316,6 +326,8 @@ class Engine:
                      f"незавершённые загрузки продолжатся с места обрыва", "warn")
         if self.db.get("scan.state") == "running":
             self.db.set("scan.state", "interrupted")
+        self._keep_started_layout()
+        self.sync_sections()
 
         self.lock = threading.RLock()
         self.buffer_lock = threading.Lock()
@@ -531,6 +543,8 @@ class Engine:
 
     def _found(self, files, scan_id):
         if files:
+            for f in files:
+                f["section"] = 1 if goes_to_photos(f, self.settings) else 0
             self.db.upsert_files(files, scan_id)
             self.db.set("scan.found", int(self.db.get("scan.found", "0")) + len(files))
 
@@ -751,7 +765,30 @@ class Engine:
             winsys.set_title(self._title())
 
     def _stats(self):
-        return self.db.stats(photos_sql(self.settings["photos_from_disk"]))
+        return self.db.stats()
+
+    def _keep_started_layout(self):
+        """Обновление с версии 2: тогда «Фотокамера» шла в «Файлы». Если оттуда уже что-то перенесено,
+        прежнюю раскладку сохраняем, чтобы одна папка не оказалась разложена в два места."""
+        keys = self.settings.stored_keys
+        if keys is None or "photos_from_disk" in keys:
+            return
+        cam = " OR ".join(f"path GLOB 'disk:/{d}/*'" for d in CAMERA_DIRS)
+        started = self.db.q1(f"SELECT 1 FROM files WHERE source='disk' AND status='done' AND ({cam}) LIMIT 1")
+        self.settings.update(photos_from_disk="none" if started else self.settings["photos_from_disk"])
+        self.settings.stored_keys.add("photos_from_disk")
+        if started:
+            self.log("Часть «Фотокамеры» уже перенесена в «Файлы» прежней версией — оставляю ту же раскладку. "
+                     "Изменить можно в «Настройках».", "warn")
+
+    def sync_sections(self):
+        """Раздел («Фото»/«Файлы») каждого файла хранится в базе; пересчитать после смены настройки."""
+        mode = self.settings["photos_from_disk"]
+        if self.db.get("section.mode") != mode:
+            n = self.db.recompute_sections(photos_sql(mode))
+            self.db.set("section.mode", mode)
+            if n:
+                self.log(f"Раскладка фото пересчитана для {n} файлов")
 
     def _refresh_quota(self):
         try:
@@ -896,8 +933,7 @@ class Engine:
         s = self.settings
         excluded, retry = self._excluded_sources(), self._retry_errors()
         if not self.buffer:
-            return self.db.claim_download(excluded, s["order"], retry_errors=retry,
-                                          photos_cond=photos_sql(s["photos_from_disk"]))
+            return self.db.claim_download(excluded, s["order"], retry_errors=retry)
         with self.buffer_lock:
             avail, cap = self._buffer_avail()
             # Сначала — недокачанные в буфер: им нужно только недостающее место, а не весь размер
@@ -910,8 +946,7 @@ class Engine:
                     row = self.db.claim_id(r["id"])
                     if row:
                         return row
-            row = self.db.claim_download(excluded, s["order"], fits=(avail, cap), retry_errors=retry,
-                                         photos_cond=photos_sql(s["photos_from_disk"]))
+            row = self.db.claim_download(excluded, s["order"], fits=(avail, cap), retry_errors=retry)
             if row and row["size"] <= cap and not row["local_path"] and not row["upload_uri"]:
                 row["local_path"] = self.buffer.part(row["id"])
                 self.db.update_file(row["id"], local_path=row["local_path"])
@@ -1741,12 +1776,13 @@ class Engine:
         elif total and used > 0.95 * total:
             out.append(("warn", f"Яндекс Диск почти заполнен: {used / GB:.1f} ГБ из {total / GB:.1f} ГБ. "
                                 f"Переносу это не мешает — программа только читает с Яндекса"))
-        if d.get("will_be_overdrawn") and d.get("unlim_end"):
-            out.append(("err", f"Бесплатный безлимит для фото заканчивается {str(d['unlim_end'])[:10]}: после этого "
+        end = _date_of(d.get("unlim_end"))
+        if d.get("will_be_overdrawn") and end and end >= time.strftime("%Y-%m-%d"):
+            out.append(("err", f"Бесплатный безлимит для фото заканчивается {end}: после этого "
                                f"фото из безлимита начнут занимать место, и Диск окажется переполнен"))
         return out
 
-    def attention(self):
+    def attention(self, st=None):
         """Что требует внимания человека — простыми словами."""
         s, out = self.settings, list(self.disk_warnings())
         if not s["yandex_token"]:
@@ -1775,8 +1811,8 @@ class Engine:
                                 f"{time.strftime('%H:%M', time.localtime(self.ya_cooldown_until))}"))
         q = self.g_quota
         if q.get("limit"):
-            st = self._stats()["by_status"]
-            left = sum(st.get(k, {}).get("bytes", 0) for k in ("pending", "active", "buffered", "uploading", "error"))
+            bs = (st or self._stats())["by_status"]
+            left = sum(bs.get(k, {}).get("bytes", 0) for k in ("pending", "active", "buffered", "uploading", "error"))
             free = q["limit"] - q["usage"]
             if left > free:
                 out.append(("err", f"На Google Drive не хватит места: свободно {free / GB:.1f} ГБ, "
@@ -1817,7 +1853,7 @@ class Engine:
             "task": self.task,
             "buffer": self.buffer_info(),
             "quota": self.g_quota,
-            "attention": self.attention(),
+            "attention": self.attention(st),
             "configured": {"yandex": bool(self.settings["yandex_token"]),
                            "cookies": bool(self.settings["yandex_cookies"]),
                            "google": bool(self.settings["google_refresh_token"]),

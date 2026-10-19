@@ -407,15 +407,22 @@ async function saveYandex(){
     const r = await api('/api/yandex/test',{method:'POST',headers:{'X-Ya2gd':'1'}});
     const over = r.total && r.used > r.total;
     let unlim;
+    // Дата окончания бесплатного безлимита (API отдаёт её не всем): строка ISO или секунды
+    let endTs = null;
+    if(r.unlim_end!=null && r.unlim_end!==''){
+      const v = typeof r.unlim_end==='number' ? (r.unlim_end<1e12 ? r.unlim_end*1000 : r.unlim_end) : Date.parse(r.unlim_end);
+      if(isFinite(v)) endTs = v;
+    }
+    const freeUntil = endTs && endTs > Date.now() ? new Date(endTs).toLocaleDateString('ru') : null;
     if(!r.photounlim_size) unlim = 'нет. Значит, фото с телефона лежат в обычных папках (обычно «Фотокамера») — программа возьмёт их через API.';
     else {
       unlim = `<b>${fmtB(r.photounlim_size)}</b> — фото и видео с телефона, которые лежат только в разделе «Фото» (не в «Файлах»). `;
       if(r.is_paid===true) unlim += 'Пока активен тариф Яндекс 360, они не занимают место. ';
+      else if(freeUntil) unlim += `Бесплатный безлимит действует до ${freeUntil}: до этой даты они место не занимают` +
+        (r.will_be_overdrawn ? ', а после — Диск окажется переполнен. ' : '. ');
       else if(r.is_paid===false) unlim += 'Тарифа Яндекс 360 нет, поэтому они, скорее всего, входят в «занято». ';
-      else unlim += 'Место не занимают только при тарифе Яндекс 360, без тарифа входят в «занято». ';
+      else unlim += 'Место не занимают только при тарифе Яндекс 360 (или пока действует старый бесплатный безлимит), иначе входят в «занято». ';
       unlim += r.photounlim_rest ? 'Отдаются официальным API.' : 'Официальный API их не отдаёт — нужен блок 3 (куки).';
-      if(r.unlim_end) unlim += `\nБесплатный безлимит заканчивается ${esc(String(r.unlim_end).slice(0,10))}` +
-        (r.will_be_overdrawn ? ' — после этого Диск окажется переполнен.' : '.');
     }
     $('yaRes').innerHTML = `✅ Токен рабочий. Пользователь: <b>${esc(r.user)}</b>` +
       `\nМесто на Диске: занято <b>${fmtB(r.used)}</b> из ${fmtB(r.total)}` + (r.trash ? ` (в Корзине ${fmtB(r.trash)})` : '') +

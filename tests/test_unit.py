@@ -145,14 +145,80 @@ def test_disk_warnings():
         e.db.set("disk.info", json.dumps({"total": 10 * gb, "used": 12 * gb}))
         w = e.disk_warnings()
         assert w and w[0][0] == "err" and "44 дня" in w[0][1], w
+        soon = time.strftime("%Y-%m-%d", time.gmtime(time.time() + 30 * 86400))
         e.db.set("disk.info", json.dumps({"total": 10 * gb, "used": 9.8 * gb, "will_be_overdrawn": True,
-                                          "unlim_end": "2026-11-01T00:00:00+00:00"}))
+                                          "unlim_end": soon + "T00:00:00+00:00"}))
         w = e.disk_warnings()
-        assert [lv for lv, _ in w] == ["warn", "err"] and "2026-11-01" in w[1][1], w
+        assert [lv for lv, _ in w] == ["warn", "err"] and soon in w[1][1], w
+        e.db.set("disk.info", json.dumps({"total": 10 * gb, "used": 1 * gb, "will_be_overdrawn": True,
+                                          "unlim_end": "2020-01-01"}))
+        assert e.disk_warnings() == []          # дата уже прошла — не пугаем
         e.db.set("disk.info", json.dumps({"total": 10 * gb, "used": 1 * gb}))
         assert e.disk_warnings() == []
         e.db.close()
         print("OK предупреждения: Диск переполнен (44/90 дней), почти полон, конец бесплатного безлимита")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_sections_and_speed():
+    """Раздел хранится в базе: выбор следующего файла быстрый даже на сотне тысяч файлов,
+    смена настройки пересчитывает раздел, а обновление с версии 2 не ломает начатую раскладку."""
+    from ya2gd.engine import Engine
+    d = tempfile.mkdtemp()
+    try:
+        e = Engine(d)
+        items = []
+        for i in range(100_000):
+            kind = i % 3
+            if kind == 0:
+                items.append({"path": f"photounlim:/{i}.jpg", "source": "photounlim", "name": f"{i}.jpg", "size": 3})
+            elif kind == 1:
+                items.append({"path": f"disk:/Фотокамера/{i}.jpg", "source": "disk", "name": f"{i}.jpg", "size": 3})
+            else:
+                items.append({"path": f"disk:/Документы/{i}.pdf", "source": "disk", "name": f"{i}.pdf", "size": 3})
+        e._found(items, 1)
+        t = time.time()
+        for _ in range(5):
+            row = e.db.claim_download(order="photos_first")
+            assert row["section"] == 1, row
+        per_claim = (time.time() - t) / 5
+        assert per_claim < 0.3, f"выбор файла слишком медленный: {per_claim:.2f} c"
+        t = time.time()
+        st = e.db.stats()
+        assert time.time() - t < 1.5
+        assert st["by_section"]["photos"]["count"] == 66_667 and st["by_section"]["files"]["count"] == 33_333, st
+        e.settings.update(photos_from_disk="none")
+        e.sync_sections()
+        st = e.db.stats()
+        assert st["by_section"]["photos"]["count"] == 33_334, st["by_section"]
+        row = e.db.claim_download(order="files_first")
+        assert row["section"] == 0
+        e.db.close()
+        print(f"OK раздел хранится в базе: выбор файла {per_claim * 1000:.0f} мс на 100 тыс. файлов; "
+              f"смена настройки пересчитывает раскладку")
+
+        # обновление с версии 2: «Фотокамера» уже частично перенесена в «Файлы» — раскладку не меняем
+        d2 = tempfile.mkdtemp()
+        with open(os.path.join(d2, "settings.json"), "w", encoding="utf-8") as f:
+            json.dump({"files_root": "Файлы с Яндекс Диска", "photos_root": "Фото"}, f)
+        from ya2gd.db import DB
+        db = DB(os.path.join(d2, "state.sqlite3"))
+        db.upsert_files([{"path": "disk:/Фотокамера/a.jpg", "source": "disk", "name": "a.jpg", "size": 1}], 1)
+        db.x("UPDATE files SET status='done'")
+        db.close()
+        e2 = Engine(d2)
+        assert e2.settings["photos_from_disk"] == "none", e2.settings["photos_from_disk"]
+        e2.db.close()
+        d3 = tempfile.mkdtemp()
+        with open(os.path.join(d3, "settings.json"), "w", encoding="utf-8") as f:
+            json.dump({"files_root": "Файлы с Яндекс Диска", "photos_root": "Фото"}, f)
+        e3 = Engine(d3)
+        assert e3.settings["photos_from_disk"] == "camera"
+        e3.db.close()
+        for x in (d2, d3):
+            shutil.rmtree(x, ignore_errors=True)
+        print("OK обновление с прошлой версии: начатая раскладка «Фотокамеры» сохраняется")
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -203,6 +269,7 @@ if __name__ == "__main__":
     test_layout()
     test_routing_sql_matches_python()
     test_disk_warnings()
+    test_sections_and_speed()
     test_memqueue()
     test_db_claims()
     print("\nМОДУЛЬНЫЕ ПРОВЕРКИ ПРОЙДЕНЫ")

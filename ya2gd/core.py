@@ -90,10 +90,12 @@ class Settings:
         self._lock = threading.Lock()
         self.values = dict(DEFAULTS)
         self.migrated = False
+        self.stored_keys = None              # None — файла настроек ещё не было (первый запуск)
         if os.path.exists(path):
             with open(path, encoding="utf-8") as f:
                 stored = json.load(f)
             self.migrated = _migrate(stored)
+            self.stored_keys = set(stored)
             self.values.update({k: v for k, v in stored.items() if k in DEFAULTS})
             if self.migrated:
                 self.update()
