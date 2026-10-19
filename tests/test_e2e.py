@@ -396,7 +396,10 @@ def check(app, M):
         live[p] = f["md5"]
     expected = {}
     for path, h in ya.items():
-        if path.startswith("disk:/"):
+        if path.startswith("disk:/Фотокамера/"):
+            # автозагрузка без безлимита — тоже в «Фото» по дате (у имитации дата загрузки 2019-05-04)
+            expected[f"{PHOTOS}/2019/2019-05/" + path.split("/")[-1]] = h
+        elif path.startswith("disk:/"):
             expected[f"{FILES}/" + path[6:]] = h
         else:
             name = path.split("/")[-1]     # дата берётся из имени файла: «2019-05-04 10-00-00.JPG»

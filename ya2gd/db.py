@@ -68,8 +68,8 @@ FILE_COLS = ("path", "source", "name", "size", "md5", "sha256", "modified",
              "created", "taken", "mime", "media_type")
 
 ORDERS = {
-    "photos_first": "(source != 'photounlim'), id",
-    "files_first": "(source != 'disk'), id",
+    "photos_first": "(NOT {photos}), id",
+    "files_first": "({photos}), id",
     "small_first": "size, id",
     "as_listed": "id",
 }
@@ -165,7 +165,8 @@ class DB:
         st = "(status='pending' OR status='error')" if retry_errors else "status='pending'"
         return f"{st} AND next_try<=?{ex}", args
 
-    def claim_download(self, excluded=(), order="photos_first", fits=None, retry_errors=True):
+    def claim_download(self, excluded=(), order="photos_first", fits=None, retry_errors=True,
+                       photos_cond="source='photounlim'"):
         """Атомарно забирает следующий файл для скачивания с Яндекса.
 
         fits=(свободно_в_буфере, размер_буфера): брать только то, что влезет в буфер сейчас,
@@ -181,7 +182,8 @@ class DB:
         with self._lock:
             row = self.conn.execute(
                 f"SELECT * FROM files WHERE {cond} "
-                f"ORDER BY (local_path IS NULL AND upload_uri IS NULL), {ORDERS.get(order, 'id')} LIMIT 1",
+                f"ORDER BY (local_path IS NULL AND upload_uri IS NULL), "
+                f"{ORDERS.get(order, 'id').format(photos=photos_cond)} LIMIT 1",
                 [now] + args).fetchone()
             if row is None:
                 return None
@@ -247,7 +249,8 @@ class DB:
         """Сколько байт буфера занято или обещано (каждый файл в буфере резервирует свой полный размер)."""
         return self.q1("SELECT IFNULL(SUM(size),0) FROM files WHERE local_path IS NOT NULL")[0]
 
-    def stats(self):
+    def stats(self, photos_cond="source='photounlim'"):
+        """photos_cond — SQL-условие «файл идёт в папку «Фото»» (см. engine.photos_sql)."""
         now = time.time()
         rows = self.q("SELECT status, COUNT(*) n, IFNULL(SUM(size),0) s FROM files GROUP BY status")
         out = {r["status"]: {"count": r["n"], "bytes": r["s"]} for r in rows}
@@ -259,16 +262,16 @@ class DB:
         prev = self.q1("SELECT COUNT(*) FROM files WHERE preview_id IS NOT NULL AND status!='done'")[0]
         day = self.q1("SELECT IFNULL(SUM(uploaded),0) FROM files WHERE done_at>?", (now - 86400,))[0]
         src = {}
-        for r in self.q("SELECT source, status, COUNT(*) n, IFNULL(SUM(size),0) s FROM files "
-                        "GROUP BY source, status"):
-            d = src.setdefault(r["source"], {"count": 0, "bytes": 0, "done": 0, "done_bytes": 0})
+        for r in self.q(f"SELECT CASE WHEN {photos_cond} THEN 'photos' ELSE 'files' END sec, status, "
+                        f"COUNT(*) n, IFNULL(SUM(size),0) s FROM files GROUP BY sec, status"):
+            d = src.setdefault(r["sec"], {"count": 0, "bytes": 0, "done": 0, "done_bytes": 0})
             d["count"] += r["n"]
             d["bytes"] += r["s"]
             if r["status"] in ("done", "skipped"):
                 d["done"] += r["n"]
                 d["done_bytes"] += r["s"]
         return {"by_status": out, "partial_bytes": partial, "waiting": {"count": w[0], "bytes": w[1]},
-                "verified": ver, "previews": prev, "google_24h": day, "by_source": src}
+                "verified": ver, "previews": prev, "google_24h": day, "by_section": src}
 
     def list_files(self, status=None, query=None, offset=0, limit=100):
         where, args = [], []

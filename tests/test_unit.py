@@ -68,6 +68,7 @@ def test_settings_migration():
         assert s.migrated
         assert s["files_root"] == "Yandex Disk" and s["photos_root"] == "Yandex Disk/Фото (безлимит)"
         assert s["photos_split"] == "year" and s["yandex_streams_max"] == 8 and s["yandex_token"] == "t"
+        assert s["photos_from_disk"] == "none"     # «Фотокамера» у старых установок остаётся в «Файлах»
         s.update(photos_root=" Архив \\ Фото/ ", buffer_gb="25", yandex_streams_max=99)
         assert s["photos_root"] == "Архив/Фото" and s["buffer_gb"] == 25 and s["yandex_streams_max"] == 16
         s2 = Settings(p)
@@ -78,7 +79,8 @@ def test_settings_migration():
 
 
 def test_layout():
-    s = {"photos_root": "Фото", "files_root": "Файлы с Яндекс Диска", "photos_split": "month"}
+    s = {"photos_root": "Фото", "files_root": "Файлы с Яндекс Диска", "photos_split": "month",
+         "photos_from_disk": "camera"}
     row = {"path": "photounlim:/2019-05-04 10-00-00.JPG", "source": "photounlim", "name": "2019-05-04 10-00-00.JPG"}
     assert drive_dir_for(row, s) == "Фото/2019/2019-05"
     row = {"path": "photounlim:/x.jpg", "source": "photounlim", "name": "x.jpg", "taken": "2021-03-01T10:00:00+00:00"}
@@ -90,12 +92,48 @@ def test_layout():
     assert drive_dir_for(row, s) == "Файлы с Яндекс Диска/Документы/2020"
     row = {"path": "disk:/корень.txt", "source": "disk", "name": "корень.txt"}
     assert drive_dir_for(row, s) == "Файлы с Яндекс Диска"
+    # автозагрузка без безлимита (папка «Фотокамера») — тоже в «Фото» по дате; документы оттуда — в «Файлы»
+    cam = {"path": "disk:/Фотокамера/2020-01-02 10-00-00.MOV", "source": "disk", "name": "2020-01-02 10-00-00.MOV"}
+    assert drive_dir_for(cam, s) == "Фото/2020/2020-01"
+    cam_sub = {"path": "disk:/Фотокамера/Screenshots/a.png", "source": "disk", "name": "a.png",
+               "created": "2021-07-01T00:00:00+00:00"}
+    assert drive_dir_for(cam_sub, s) == "Фото/2021/2021-07/Screenshots"
+    doc = {"path": "disk:/Фотокамера/notes.txt", "source": "disk", "name": "notes.txt", "mime": "text/plain"}
+    assert drive_dir_for(doc, s) == "Файлы с Яндекс Диска/Фотокамера"
+    other = {"path": "disk:/Маша камера/IMG_20190504_1.jpg", "source": "disk", "name": "IMG_20190504_1.jpg"}
+    assert drive_dir_for(other, s) == "Файлы с Яндекс Диска/Маша камера"
+    assert drive_dir_for(other, dict(s, photos_from_disk="all")) == "Фото/2019/2019-05"
+    assert drive_dir_for(cam, dict(s, photos_from_disk="none")) == "Файлы с Яндекс Диска/Фотокамера"
     assert name_date("IMG_20190504_101010.jpg") == "2019-05-04"
     assert is_media({"name": "VID.MOV"}) and not is_media({"name": "a.pdf", "mime": "application/pdf"})
     assert to_mpfs("disk:/A/b.txt") == "/disk/A/b.txt" and from_mpfs("/disk/A/b.txt") == "disk:/A/b.txt"
     assert to_mpfs("photounlim:/a.jpg") == "/photounlim/a.jpg" and from_mpfs("/photounlim/a.jpg") == "photounlim:/a.jpg"
     assert parse_cookies("Cookie: a=1; b=2") == {"a": "1", "b": "2"}
     print("OK раскладка: «Фото/год/год-месяц» и «Файлы с Яндекс Диска/<те же папки>»")
+
+
+def test_routing_sql_matches_python():
+    import sqlite3
+    from ya2gd.core import DEFAULTS
+    from ya2gd.engine import goes_to_photos, photos_sql
+    rows = [("photounlim", "photounlim:/a.jpg", "a.jpg", None, None),
+            ("disk", "disk:/Фотокамера/IMG_1.JPG", "IMG_1.JPG", None, "application/octet-stream"),
+            ("disk", "disk:/Фотокамера/x.pdf", "x.pdf", None, "application/pdf"),
+            ("disk", "disk:/Видео проекты/clip.MOV", "clip.MOV", "video", "video/quicktime"),
+            ("disk", "disk:/Документы/a.docx", "a.docx", "document", None),
+            ("disk", "disk:/Camera Uploads/b.heic", "b.heic", None, None),
+            ("disk", "disk:/camera uploads/c.jpg", "c.jpg", None, None),
+            ("disk", "disk:/Фотокамера.jpg", "Фотокамера.jpg", "image", None)]
+    c = sqlite3.connect(":memory:")
+    c.execute("CREATE TABLE files(source, path, name, media_type, mime)")
+    c.executemany("INSERT INTO files VALUES(?,?,?,?,?)", rows)
+    for mode in ("camera", "all", "none"):
+        in_sql = [bool(x[0]) for x in c.execute(f"SELECT {photos_sql(mode)} FROM files")]
+        in_py = [goes_to_photos(dict(zip(("source", "path", "name", "media_type", "mime"), r)),
+                                dict(DEFAULTS, photos_from_disk=mode)) for r in rows]
+        assert in_sql == in_py, (mode, in_sql, in_py)
+    c.close()
+    print("OK подсчёт прогресса по папкам совпадает с тем, куда реально кладутся файлы")
 
 
 def test_memqueue():
@@ -142,6 +180,7 @@ if __name__ == "__main__":
     test_gate()
     test_settings_migration()
     test_layout()
+    test_routing_sql_matches_python()
     test_memqueue()
     test_db_claims()
     print("\nМОДУЛЬНЫЕ ПРОВЕРКИ ПРОЙДЕНЫ")

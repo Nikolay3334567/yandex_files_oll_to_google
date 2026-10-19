@@ -70,32 +70,78 @@ def name_date(name):
     return f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else None
 
 
-def drive_dir_for(row, s):
-    """Полный путь папки на Drive для файла.
-    «Фото» (безлимит) → <photos_root>/<год>/<год-месяц>; «Файлы» → <files_root>/<те же папки, что на Яндексе>."""
+# Папка автозагрузки с телефона, когда безлимит выключен: эти фото занимают место на Диске,
+# лежат в «Файлах», но на сайте Яндекса видны и в разделе «Фото».
+CAMERA_DIRS = ("Фотокамера", "Camera Uploads")
+MEDIA_EXTS = ("jpg", "jpeg", "png", "heic", "heif", "webp", "gif", "bmp", "tif", "tiff", "dng", "cr2", "nef",
+              "arw", "raw", "mp4", "mov", "3gp", "avi", "mkv", "m4v", "mts", "m2ts", "wmv", "mpg", "mpeg")
+PHOTOS_FROM_DISK = ("camera", "all", "none")
+
+
+def _rel(row):
     path = row["path"]
-    rel = path.split(":", 1)[1].lstrip("/") if ":" in path else path.lstrip("/")
-    sub = rel.rsplit("/", 1)[0] if "/" in rel else ""
-    if row["source"] == "photounlim":
-        base = s["photos_root"]
-        date = (row.get("taken") or name_date(row.get("name")) or row.get("created") or
-                row.get("modified") or "")[:10]
-        split = s["photos_split"]
-        if len(date) == 10 and date[4] == "-":
-            if split == "year":
-                base += "/" + date[:4]
-            elif split == "month":
-                base += f"/{date[:4]}/{date[:7]}"
-        return f"{base}/{sub}" if sub else base
-    return f"{s['files_root']}/{sub}" if sub else s["files_root"]
+    return path.split(":", 1)[1].lstrip("/") if ":" in path else path.lstrip("/")
 
 
 def is_media(row):
     mt = (row.get("media_type") or "").lower()
     mime = (row.get("mime") or "").lower()
+    name = (row.get("name") or "").lower()
     return mt in ("image", "video") or mime.startswith(("image/", "video/")) or \
-        re.search(r"\.(jpe?g|png|heic|heif|webp|gif|bmp|tiff?|dng|cr2|nef|arw|mp4|mov|3gp|avi|mkv|m4v)$",
-                  row.get("name") or "", re.I) is not None
+        ("." in name and name.rsplit(".", 1)[1] in MEDIA_EXTS)
+
+
+def goes_to_photos(row, s):
+    """Куда файл: в «Фото» (по датам) или в «Файлы» (в своих папках).
+    Безлимит — всегда в «Фото». Фото и видео из обычных папок — по настройке photos_from_disk:
+    camera — из «Фотокамеры», all — отовсюду, none — никогда."""
+    if row["source"] == "photounlim":
+        return True
+    mode = s["photos_from_disk"]
+    if mode == "none" or not is_media(row):
+        return False
+    if mode == "all":
+        return True
+    rel = _rel(row)
+    return "/" in rel and rel.split("/", 1)[0] in CAMERA_DIRS
+
+
+def photos_sql(mode):
+    """То же правило, что goes_to_photos, в виде условия SQL — для подсчёта прогресса по папкам."""
+    media = ("(lower(IFNULL(media_type,'')) IN ('image','video') OR lower(IFNULL(mime,'')) LIKE 'image/%' "
+             "OR lower(IFNULL(mime,'')) LIKE 'video/%' OR " +
+             " OR ".join(f"lower(name) LIKE '%.{e}'" for e in MEDIA_EXTS) + ")")
+    if mode == "none":
+        disk = "0"
+    elif mode == "all":
+        disk = media
+    else:
+        # GLOB, а не LIKE: с учётом регистра, как и проверка в goes_to_photos
+        disk = "(" + " OR ".join(f"path GLOB 'disk:/{d}/*'" for d in CAMERA_DIRS) + f") AND {media}"
+    return f"(source='photounlim' OR (source='disk' AND {disk}))"
+
+
+def drive_dir_for(row, s):
+    """Полный путь папки на Drive для файла.
+    В «Фото»: <photos_root>/<год>/<год-месяц>; в «Файлы»: <files_root>/<те же папки, что на Яндексе>."""
+    rel = _rel(row)
+    sub = rel.rsplit("/", 1)[0] if "/" in rel else ""
+    if not goes_to_photos(row, s):
+        return f"{s['files_root']}/{sub}" if sub else s["files_root"]
+    if row["source"] == "disk":
+        # из «Фотокамеры» — с подпапками внутри неё; из любых папок (режим all) — только по дате
+        top, _, inner = sub.partition("/")
+        sub = inner if top in CAMERA_DIRS else ""
+    base = s["photos_root"]
+    date = (row.get("taken") or name_date(row.get("name")) or row.get("created") or
+            row.get("modified") or "")[:10]
+    split = s["photos_split"]
+    if len(date) == 10 and date[4] == "-":
+        if split == "year":
+            base += "/" + date[:4]
+        elif split == "month":
+            base += f"/{date[:4]}/{date[:7]}"
+    return f"{base}/{sub}" if sub else base
 
 
 def is_network(e):
@@ -436,7 +482,7 @@ class Engine:
                     raise Paused()
                 db.set("scan.phase", "done")
             db.set("scan.state", "done")
-            st = db.stats()
+            st = self._stats()
             total = sum(v["count"] for v in st["by_status"].values())
             self.log(f"Список получен. Всего файлов: {total} "
                      f"({sum(v['bytes'] for v in st['by_status'].values()) / GB:.1f} ГБ)")
@@ -677,7 +723,7 @@ class Engine:
                 self.transfer_state = "paused"
                 self.log("Перенос остановлен. Нажмите «Старт», чтобы продолжить с того же места.")
             else:
-                st = self.db.stats()["by_status"]
+                st = self._stats()["by_status"]
                 left = self.db.q1("SELECT COUNT(*) FROM files WHERE status IN ('pending','error') "
                                   "AND next_try<?", (FOREVER,))[0]
                 if left and self._excluded_sources():
@@ -694,6 +740,9 @@ class Engine:
         if winsys.WIN:
             winsys.set_title(self._title())
 
+    def _stats(self):
+        return self.db.stats(photos_sql(self.settings["photos_from_disk"]))
+
     def _refresh_quota(self):
         try:
             q = self.drive(self.stop_transfer).about().get("storageQuota") or {}
@@ -703,7 +752,7 @@ class Engine:
             self.log(f"Не удалось узнать место на Google Drive: {e}", "debug")
 
     def _title(self):
-        st = self.db.stats()
+        st = self._stats()
         bs = st["by_status"]
         total = sum(v["bytes"] for v in bs.values()) or 1
         done = bs.get("done", {}).get("bytes", 0) + bs.get("skipped", {}).get("bytes", 0)
@@ -837,7 +886,8 @@ class Engine:
         s = self.settings
         excluded, retry = self._excluded_sources(), self._retry_errors()
         if not self.buffer:
-            return self.db.claim_download(excluded, s["order"], retry_errors=retry)
+            return self.db.claim_download(excluded, s["order"], retry_errors=retry,
+                                          photos_cond=photos_sql(s["photos_from_disk"]))
         with self.buffer_lock:
             avail, cap = self._buffer_avail()
             # Сначала — недокачанные в буфер: им нужно только недостающее место, а не весь размер
@@ -850,7 +900,8 @@ class Engine:
                     row = self.db.claim_id(r["id"])
                     if row:
                         return row
-            row = self.db.claim_download(excluded, s["order"], fits=(avail, cap), retry_errors=retry)
+            row = self.db.claim_download(excluded, s["order"], fits=(avail, cap), retry_errors=retry,
+                                         photos_cond=photos_sql(s["photos_from_disk"]))
             if row and row["size"] <= cap and not row["local_path"] and not row["upload_uri"]:
                 row["local_path"] = self.buffer.part(row["id"])
                 self.db.update_file(row["id"], local_path=row["local_path"])
@@ -1280,7 +1331,7 @@ class Engine:
 
     def _mtime(self, row):
         """Дата файла на Drive: у фото — дата съёмки, у остального — дата изменения на Яндексе."""
-        t = row.get("taken") if row["source"] == "photounlim" else None
+        t = row.get("taken") if goes_to_photos(row, self.settings) else None
         t = t or row.get("modified")
         return t if t and re.match(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d", t) else None
 
@@ -1692,7 +1743,7 @@ class Engine:
                                 f"{time.strftime('%H:%M', time.localtime(self.ya_cooldown_until))}"))
         q = self.g_quota
         if q.get("limit"):
-            st = self.db.stats()["by_status"]
+            st = self._stats()["by_status"]
             left = sum(st.get(k, {}).get("bytes", 0) for k in ("pending", "active", "buffered", "uploading", "error"))
             free = q["limit"] - q["usage"]
             if left > free:
@@ -1705,7 +1756,7 @@ class Engine:
         return [{"level": lv, "msg": m} for lv, m in out]
 
     def status(self):
-        st = self.db.stats()
+        st = self._stats()
         sy, sg = self.speed_bps("yandex"), self.speed_bps("google")
         bs = st["by_status"]
         total_b = sum(v["bytes"] for v in bs.values())

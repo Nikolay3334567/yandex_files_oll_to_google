@@ -21,6 +21,8 @@ DEFAULTS = {
     "files_root": "Файлы с Яндекс Диска",  # раздел «Файлы» — с той же иерархией папок
     "previews_root": "Превью — оригинал пока недоступен",
     "photos_split": "month",              # none | year | month — раскладка внутри «Фото»
+    "photos_from_disk": "camera",         # фото/видео из «Файлов»: camera — из «Фотокамеры» в «Фото»;
+                                          # all — все в «Фото»; none — всё остаётся в своих папках
     "scan_mode": "flat",                  # flat — плоский список; tree — обход папок; web — через веб-версию
     "include_photounlim": True,
     "include_disk": True,
@@ -116,6 +118,11 @@ class Settings:
                 self.values[k] = v
             for k, (lo, hi) in LIMITS.items():
                 self.values[k] = max(lo, min(hi, int(self.values[k])))
+            for k, ok in (("photos_from_disk", ("camera", "all", "none")), ("photos_split", ("none", "year", "month")),
+                          ("order", ("photos_first", "files_first", "small_first", "as_listed")),
+                          ("scan_mode", ("flat", "tree", "web"))):
+                if self.values[k] not in ok:
+                    self.values[k] = DEFAULTS[k]
             for k in ("photos_root", "files_root", "previews_root"):
                 self.values[k] = "/".join(p.strip() for p in str(self.values[k]).replace("\\", "/").split("/")
                                           if p.strip()) or DEFAULTS[k]
@@ -146,6 +153,7 @@ def _migrate(stored):
     stored["photos_root"] = f"{root}/{stored.pop('photounlim_folder', '') or 'Фото (безлимит)'}"
     if "photounlim_split" in stored:
         stored["photos_split"] = stored.pop("photounlim_split")
+    stored["photos_from_disk"] = "none"     # в версии 1 «Фотокамера» шла в «Файлы» — не перекладываем
     if "workers" in stored:
         stored["yandex_streams_max"] = max(int(stored.pop("workers")), 4)
     return True

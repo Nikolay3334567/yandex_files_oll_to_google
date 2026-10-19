@@ -100,14 +100,14 @@ a{color:var(--acc)}
 
   <div class="grid3">
     <div class="card">
-      <h3>Раздел «Фото» → Google</h3>
+      <h3>Фото и видео → Google</h3>
       <div class="small muted" id="secPhotosDst"></div>
       <div class="big-num" id="secPhotosPct">—</div>
       <div class="bar"><div id="secPhotosBar" class="ok" style="width:0"></div></div>
       <div class="small muted" id="secPhotosText" style="margin-top:4px"></div>
     </div>
     <div class="card">
-      <h3>Раздел «Файлы» → Google</h3>
+      <h3>Остальные файлы → Google</h3>
       <div class="small muted" id="secFilesDst"></div>
       <div class="big-num" id="secFilesPct">—</div>
       <div class="bar"><div id="secFilesBar" class="ok" style="width:0"></div></div>
@@ -265,11 +265,19 @@ a{color:var(--acc)}
     <div class="card">
       <h2>Настройки</h2>
       <div class="grid" style="grid-template-columns:1fr 1fr;gap:0 12px">
-        <div><label>Папка для раздела «Фото» на Drive</label><input id="photos_root"></div>
+        <div><label>Папка для фото и видео на Drive</label><input id="photos_root"></div>
         <div><label>Раскладка внутри «Фото»</label>
           <select id="photos_split"><option value="month">Год / месяц</option><option value="year">По годам</option><option value="none">Всё в одну папку</option></select></div>
-        <div><label>Папка для раздела «Файлы» на Drive</label><input id="files_root"></div>
+        <div><label>Папка для остальных файлов на Drive</label><input id="files_root"></div>
         <div><label>Папка для превью (если оригинал недоступен)</label><input id="previews_root"></div>
+        <div style="grid-column:1/-1"><label>Фото и видео, которые лежат в обычных папках Диска (не в безлимите)</label>
+          <select id="photos_from_disk">
+            <option value="camera">Из папки «Фотокамера» (автозагрузка с телефона) — в «Фото» по датам; из других папок — в своих папках</option>
+            <option value="all">Все фото и видео с Диска — в «Фото» по датам; в «Файлах» — только остальное</option>
+            <option value="none">Оставить в своих папках, как на Яндексе (в «Фото» — только безлимит)</option>
+          </select>
+          <div class="small muted" style="margin-top:4px">Каждый файл попадает на Drive ровно один раз — дублей между «Фото» и «Файлами» нет.
+            Выберите до начала переноса: уже перенесённые файлы не перекладываются.</div></div>
         <div><label>Что переносить первым</label>
           <select id="order"><option value="photos_first">Сначала «Фото»</option><option value="files_first">Сначала «Файлы»</option>
             <option value="small_first">Сначала маленькие (больше файлов быстрее)</option><option value="as_listed">По порядку списка</option></select></div>
@@ -397,10 +405,11 @@ async function saveYandex(){
     await post('/api/settings', collect(['yandex_token','yandex_client_id']));
     await loadSettings();
     const r = await api('/api/yandex/test',{method:'POST',headers:{'X-Ya2gd':'1'}});
-    $('yaRes').innerHTML = `✅ Токен рабочий. Пользователь: <b>${esc(r.user)}</b>\nЗанято: ${fmtB(r.used)} из ${fmtB(r.total)}`+
-      `\nРаздел «Файлы» через API: ${esc(r.files_api)}`+
-      `\nРаздел «Фото» (безлимит): ${r.photounlim_size?fmtB(r.photounlim_size):'пуст'}` +
-      (r.photounlim_size ? (r.photounlim_rest ? ' — отдаётся официальным API' : ' — официальный API не отдаёт, нужен блок 3 (куки)') : '');
+    $('yaRes').innerHTML = `✅ Токен рабочий. Пользователь: <b>${esc(r.user)}</b>\nМесто на Диске: занято ${fmtB(r.used)} из ${fmtB(r.total)}`+
+      `\nБезлимитные фото и видео (место не занимают, видны только в разделе «Фото»): <b>${r.photounlim_size?fmtB(r.photounlim_size):'нет'}</b>` +
+      (r.photounlim_size ? (r.photounlim_rest ? ' — отдаются официальным API' : ' — официальный API их не отдаёт, нужен блок 3 (куки)') :
+        '\nЗначит, все ваши фото лежат в обычных папках (обычно «Фотокамера») и входят в «занято» — программа возьмёт их через API.') +
+      `\n«Файлы» через API: ${esc(r.files_api)}`;
   }catch(e){ $('yaRes').textContent='❌ '+e.message; }
 }
 function yaToken(){
@@ -432,7 +441,7 @@ async function testGoogle(){
 }
 async function saveSettings(){
   try{
-    await post('/api/settings', collect(['photos_root','photos_split','files_root','previews_root','order','scan_mode',
+    await post('/api/settings', collect(['photos_root','photos_split','photos_from_disk','files_root','previews_root','order','scan_mode',
       'yandex_streams_max','google_streams','chunk_mb','max_attempts','auto_retry_hours','port','yandex_adaptive',
       'include_photounlim','include_disk','save_previews','skip_existing','verify_md5','autostart','win_autorun','app_window']));
     $('setRes').textContent='Сохранено'; setTimeout(()=>$('setRes').textContent='',2000); loadSettings();
@@ -487,10 +496,11 @@ function tile(key,label,obj,cls,hint){
   return `<div class="tile" onclick="$('fStatus').value='${key}';page=0;loadFiles();$('fBody').scrollIntoView({behavior:'smooth'})"><div class="small muted">${label}</div>
   <div class="v ${cls||''}">${(obj?.count||0).toLocaleString('ru')}</div><div class="small muted">${fmtB(obj?.bytes||0)}</div>${hint?`<div class="hint">${hint}</div>`:''}</div>`;
 }
-function section(prefix, src, dst){
+const PHOTO_SRC = {camera:'безлимит + папка «Фотокамера»', all:'безлимит + все фото и видео с Диска', none:'только безлимит'};
+function section(prefix, src, dst, what){
   src = src || {count:0,bytes:0,done:0,done_bytes:0};
   const p = pct(src.done_bytes, src.bytes);
-  $(prefix+'Dst').textContent = 'в папку «'+dst+'»';
+  $(prefix+'Dst').textContent = 'в папку «'+dst+'»' + (what ? ' · '+what : '');
   $(prefix+'Pct').textContent = src.count ? p.toFixed(1)+'%' : '—';
   $(prefix+'Bar').style.width = p.toFixed(2)+'%';
   $(prefix+'Text').textContent = src.count ? `${src.done.toLocaleString('ru')} из ${nf(src.count)} · ${fmtB(src.done_bytes)} из ${fmtB(src.bytes)}` : 'список ещё не получен';
@@ -523,8 +533,8 @@ async function refresh(){
   $('attention').innerHTML = s.attention.length ? '<div class="card"><h2>Требует внимания</h2>' +
     s.attention.map(a=>`<div class="att ${a.level==='err'?'err':''}">${esc(a.msg)}</div>`).join('') + '</div>' : '';
 
-  section('secPhotos', s.stats.by_source.photounlim, s.folders.photos);
-  section('secFiles', s.stats.by_source.disk, s.folders.files);
+  section('secPhotos', s.stats.by_section.photos, s.folders.photos, PHOTO_SRC[settings.photos_from_disk]);
+  section('secFiles', s.stats.by_section.files, s.folders.files, 'с той же иерархией папок');
   $('verNum').textContent = s.stats.verified.toLocaleString('ru') + ' из ' + sum('done').count.toLocaleString('ru');
   $('verText').innerHTML = 'готовых файлов подтверждены: на Google тот же размер и MD5, что на Яндексе' +
     (s.stats.previews ? `<br>Только превью (оригинал ждём): <b>${s.stats.previews}</b> — папка «${esc(s.folders.previews)}»` : '') +

@@ -67,3 +67,36 @@ jobs:
           gh release create latest dist/YandexToGoogle.exe --target "$GITHUB_SHA" --prerelease \
             --title "YandexToGoogle.exe — последняя сборка" \
             --notes "Собрано из ветки ${GITHUB_REF_NAME} (${GITHUB_SHA::7}); все проверки пройдены на Windows. Скачайте YandexToGoogle.exe ниже и запустите. Инструкция — в README репозитория."
+
+  # Проверка build_exe.bat ровно так, как его запускают у себя: свежий Python (3.14),
+  # PyInstaller — последняя подходящая версия.
+  build-bat-latest-python:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: build_exe.bat
+        shell: cmd
+        run: build_exe.bat --no-pause
+
+      - name: Проверка, что собранный exe запускается
+        shell: pwsh
+        run: |
+          $env:YA2GD_DATA = "$env:RUNNER_TEMP\exe-data-314"
+          $p = Start-Process dist\YandexToGoogle.exe -ArgumentList "--no-browser","--port","8798" -PassThru
+          $ok = $false
+          foreach ($i in 1..30) {
+            Start-Sleep 2
+            try { $r = Invoke-RestMethod http://127.0.0.1:8798/api/status; $ok = $true; break } catch {}
+          }
+          Stop-Process -Id $p.Id -Force
+          if (-not $ok) { throw "exe не ответил" }
+          Write-Host "exe (Python 3.14) работает, версия $($r.version)"
