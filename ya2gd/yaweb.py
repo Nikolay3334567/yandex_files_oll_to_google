@@ -161,7 +161,7 @@ class YandexWeb:
         if wait > 0:
             time.sleep(wait)
 
-    def call(self, method, params=None, tries=6):
+    def call(self, method, params=None, tries=6, timeout=(20, 120)):
         last = None
         refreshed = False
         for attempt in range(tries):
@@ -172,7 +172,7 @@ class YandexWeb:
                 body["requestParams"] = params
             self._throttle()
             try:
-                r = self.session().post(f"{BASE}/models-v2", params={"m": method}, json=body, timeout=(20, 120))
+                r = self.session().post(f"{BASE}/models-v2", params={"m": method}, json=body, timeout=timeout)
             except NETWORK_ERRORS as e:
                 last = ApiError(f"Яндекс (веб) {method}: сеть: {e}", retryable=True)
             else:
@@ -211,6 +211,8 @@ class YandexWeb:
                                     retryable=r.status_code >= 500)
                     if not last.retryable:
                         raise last
+            if attempt == tries - 1:
+                break                    # после последней попытки ждать незачем
             delay = backoff(attempt, base=2, cap=60)
             self.log(f"{last} — повтор через {delay:.0f} c", level="warn")
             if self.stop_event is not None:
@@ -232,7 +234,7 @@ class YandexWeb:
         return files, dirs, len(children)
 
     def file_url(self, path):
-        data = self.call("mpfs/url", {"path": to_mpfs(path)})
+        data = self.call("mpfs/url", {"path": to_mpfs(path)}, tries=2, timeout=(10, 30))
         url = data.get("file") if isinstance(data, dict) else None
         if not url:
             raise ApiError(f"Яндекс не выдал ссылку на файл: {str(data)[:200]}", retryable=True)

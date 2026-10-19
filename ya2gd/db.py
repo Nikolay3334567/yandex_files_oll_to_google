@@ -122,6 +122,10 @@ class DB:
         r = self.q1("SELECT value FROM kv WHERE key=?", (key,))
         return r[0] if r and r[0] is not None else default
 
+    def incr(self, key, n=1):
+        with self._lock:
+            self.set(key, int(self.get(key, "0")) + n)
+
     def set(self, key, value):
         self.x("INSERT INTO kv(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                (key, None if value is None else str(value)))

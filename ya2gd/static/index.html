@@ -287,13 +287,12 @@ a{color:var(--acc)}
         <div><label>Потоков к Google</label><input id="google_streams" type="number" min="1" max="8"></div>
         <div><label>Размер куска, МБ</label><input id="chunk_mb" type="number" min="1" max="256"></div>
         <div><label>Попыток на файл до «ошибки»</label><input id="max_attempts" type="number" min="1"></div>
-        <div><label>Повторять ошибки сами каждые, ч (0 — нет)</label><input id="auto_retry_hours" type="number" min="0"></div>
+        <div><label>Повторять ошибки сами каждые, ч (0 — только вручную)</label><input id="auto_retry_hours" type="number" min="0"></div>
         <div><label>Порт интерфейса</label><input id="port" type="number"></div>
       </div>
-      <div class="chk"><input type="checkbox" id="yandex_adaptive"><span>Подбирать число потоков к Яндексу автоматически: начинать с 3, прибавлять, пока Яндекс отвечает стабильно, и сбавлять при жалобах</span></div>
+      <div class="chk"><input type="checkbox" id="yandex_adaptive"><span>Подбирать число потоков к Яндексу автоматически: начинать с 4, прибавлять каждые 30 с, пока Яндекс отвечает, и сбавлять, только когда он сам просит притормозить (429, 503). Недоступные файлы потоки не отнимают</span></div>
       <div class="chk"><input type="checkbox" id="include_photounlim"><span>Переносить раздел «Фото» (безлимит)</span></div>
       <div class="chk"><input type="checkbox" id="include_disk"><span>Переносить раздел «Файлы»</span></div>
-      <div class="chk"><input type="checkbox" id="save_previews"><span>Если Яндекс долго не отдаёт оригинал фото — сохранить хотя бы превью (уменьшенную копию) в отдельную папку; когда оригинал перенесётся, превью удалится</span></div>
       <div class="chk"><input type="checkbox" id="skip_existing"><span>Не заливать повторно файл, который уже лежит на Drive (то же имя, размер и MD5)</span></div>
       <div class="chk"><input type="checkbox" id="verify_md5"><span>Проверять MD5 после загрузки</span></div>
       <div class="chk"><input type="checkbox" id="autostart"><span>При запуске программы сам продолжать прерванный перенос</span></div>
@@ -308,7 +307,9 @@ a{color:var(--acc)}
       <h2>Обслуживание</h2>
       <div class="kv" id="taskBox"></div>
       <div style="display:grid;gap:8px;margin-top:10px">
-        <button onclick="post('/api/actions/retry_errors')">↻ Повторить ошибки и отложенные прямо сейчас</button>
+        <div class="small muted">Файлы, которые Яндекс не отдал, сразу уходят в «Отложенные» и сами не повторяются — чтобы не тормозить остальное.</div>
+        <button onclick="post('/api/actions/retry_errors')">↻ Повторить отложенные и ошибки (ещё один проход)</button>
+        <a href="/api/report.csv?status=deferred"><button style="width:100%">⬇ Список отложенных (CSV для Excel)</button></a>
         <button onclick="post('/api/actions/previews')">🖼 Сохранить превью для всех фото, которые Яндекс сейчас не отдаёт</button>
         <div class="small muted">Сверка находит удалённые на Drive и несовпавшие файлы и ставит их в очередь:</div>
         <button onclick="post('/api/actions/verify_drive')">🔎 Полная сверка с Google Drive (размер и MD5 каждого файла)</button>
@@ -327,7 +328,7 @@ a{color:var(--acc)}
       <select id="fStatus" style="width:auto" onchange="page=0;loadFiles()">
         <option value="">Все</option><option value="pending">В очереди</option><option value="active">Качаются</option>
         <option value="buffered">В буфере</option><option value="uploading">Заливаются</option>
-        <option value="done">Готово</option><option value="waiting">Ждут Яндекса</option><option value="preview">Есть только превью</option>
+        <option value="done">Готово</option><option value="deferred">Отложены (Яндекс не отдал)</option><option value="waiting">Ждут повтора</option><option value="preview">Есть только превью</option>
         <option value="error">Ошибки</option><option value="skipped">Пропущены</option>
       </select>
       <input id="fQuery" placeholder="Поиск по пути" style="flex:1;min-width:160px" oninput="page=0;clearTimeout(window._qt);window._qt=setTimeout(loadFiles,300)">
@@ -350,8 +351,8 @@ a{color:var(--acc)}
 
 <script>
 const $ = id => document.getElementById(id);
-const ST = {pending:'В очереди', active:'Качается', buffered:'В буфере', uploading:'Заливается', done:'Готово', error:'Ошибка', skipped:'Пропущен'};
-const STB = {pending:'', active:'b-acc', buffered:'b-warn', uploading:'b-acc', done:'b-ok', error:'b-err', skipped:'b-warn'};
+const ST = {pending:'В очереди', active:'Качается', buffered:'В буфере', uploading:'Заливается', done:'Готово', error:'Ошибка', skipped:'Пропущен', deferred:'Отложен'};
+const STB = {pending:'', active:'b-acc', buffered:'b-warn', uploading:'b-acc', done:'b-ok', error:'b-err', skipped:'b-warn', deferred:'b-warn'};
 let page = 0, logSeq = 0, settings = {}, lastStatus = null;
 
 function fmtB(b){ if(b==null) return '—'; const u=['Б','КБ','МБ','ГБ','ТБ']; let i=0; b=+b;
@@ -462,7 +463,7 @@ async function saveSettings(){
   try{
     await post('/api/settings', collect(['photos_root','photos_split','photos_from_disk','files_root','previews_root','order','scan_mode',
       'yandex_streams_max','google_streams','chunk_mb','max_attempts','auto_retry_hours','port','yandex_adaptive',
-      'include_photounlim','include_disk','save_previews','skip_existing','verify_md5','autostart','win_autorun','app_window']));
+      'include_photounlim','include_disk','skip_existing','verify_md5','autostart','win_autorun','app_window']));
     $('setRes').textContent='Сохранено'; setTimeout(()=>$('setRes').textContent='',2000); loadSettings();
   }catch(e){}
 }
@@ -543,6 +544,7 @@ async function refresh(){
   const map = {idle:['Ожидание',''],running:['Идёт перенос','b-acc'],pausing:['Останавливаюсь…','b-warn'],paused:['На паузе','b-warn'],
     done:['Завершено','b-ok'],attention:['Нужно ваше внимание','b-err']};
   let [txt,cls] = map[t.state]||[t.state,''];
+  if(t.state==='done' && sum('deferred').count){ txt=`Проход завершён · отложено ${nf(sum('deferred').count)}`; cls='b-warn'; }
   if(t.state==='running' && t.offline_since){ txt='Нет интернета — жду'; cls='b-err'; }
   else if(t.state==='running' && !s.active.length && t.next_wakeup){ txt='Жду: Яндекс пока не отдаёт часть файлов, повтор в '+hhmm(t.next_wakeup); cls='b-warn'; }
   $('stateBadge').textContent = txt; $('stateBadge').className = 'badge '+cls;
@@ -565,12 +567,13 @@ async function refresh(){
     ['Потоков', `${g.active} из ${g.limit}` + (g.adaptive ? ` (авто, потолок ${g.max})` : ' (фиксировано)')],
     ['Почему столько', esc(g.reason)],
     ['Пауза', t.ya_cooldown ? 'до '+hhmm(t.ya_cooldown)+' (Яндекс просил)' : 'нет'],
-    ['Ждут Яндекса', s.stats.waiting.count ? `${nf(s.stats.waiting.count)} (${fmtB(s.stats.waiting.bytes)})` : 'нет'],
+    ['Отложено', sum('deferred').count ? `${nf(sum('deferred').count)} (${fmtB(sum('deferred').bytes)}) — Яндекс не отдал` : 'нет'],
   ]);
   const b = s.buffer;
   if(b.enabled){
     const used = b.written;
-    $('bufBox').innerHTML = kv([['Папка', esc(b.dir)], ['Занято', `${fmtB(used)} из ${fmtB(b.cap)}`],
+    $('bufBox').innerHTML = kv([['Папка', esc(b.dir) + (b.in_use ? '' : ' <span style="color:var(--warn)">(включится при «Старте»)</span>')],
+      ['Прошло через буфер', `${nf(b.passed_files)}, ${fmtB(b.passed_bytes)}`], ['Занято сейчас', `${fmtB(used)} из ${fmtB(b.cap)}`],
       ['Ждут Google', nf(b.files)], ['Свободно на диске', b.free!=null ? fmtB(b.free) : '—']]);
     $('bufBar').style.width = pct(used, b.cap).toFixed(1)+'%';
   } else {
@@ -591,8 +594,8 @@ async function refresh(){
     tile('pending','В очереди',{count:sum('pending').count-s.stats.waiting.count,bytes:sum('pending').bytes-s.stats.waiting.bytes}) +
     tile('active','Качаются',sum('active')) + tile('buffered','В буфере',sum('buffered'),'','ждут загрузки в Google') +
     tile('uploading','Заливаются',sum('uploading')) +
-    tile('waiting','Ждут Яндекса',s.stats.waiting, s.stats.waiting.count?'warn':'','сервер молчит, повторю сам') +
-    tile('error','Ошибки',sum('error'), sum('error').count?'err':'', settings.auto_retry_hours?`повторю сам через ${settings.auto_retry_hours} ч`:'') +
+    tile('deferred','Отложены',sum('deferred'), sum('deferred').count?'warn':'','Яндекс не отдал — повторить вручную') +
+    tile('error','Ошибки',sum('error'), sum('error').count?'err':'', settings.auto_retry_hours?`повторю сам через ${settings.auto_retry_hours} ч`:'повторить вручную') +
     tile('skipped','Пропущено',sum('skipped'));
 
   $('active').innerHTML = s.active.length ? s.active.map(a=>{
@@ -645,15 +648,15 @@ async function loadFiles(){
   $('fBody').innerHTML = r.items.map(f=>{
     const waiting = f.status==='pending' && f.next_try>now;
     return `<tr><td class="path">${esc(f.path)}</td><td>${fmtB(f.size)}</td>
-    <td><span class="badge ${waiting?'b-warn':STB[f.status]}">${waiting?'Ждёт Яндекса':(ST[f.status]||f.status)}</span>${f.verified?'<div class="small" style="color:var(--ok)">✓ MD5 сверен</div>':''}
+    <td><span class="badge ${waiting?'b-warn':STB[f.status]}">${waiting?'Ждёт повтора':(ST[f.status]||f.status)}</span>${f.verified?'<div class="small" style="color:var(--ok)">✓ MD5 сверен</div>':''}
     ${f.attempts?`<div class="small muted">попыток: ${f.attempts}</div>`:''}${f.defers?`<div class="small muted">откладывался: ${f.defers}</div>`:''}
     ${(waiting||f.status==='error')&&f.next_try<4e9?`<div class="small muted">повтор в ${hhmm(f.next_try)}</div>`:''}
     ${(f.status==='pending'||f.status==='uploading'||f.status==='buffered')&&f.bytes_done?`<div class="small muted">в Google ${fmtB(f.bytes_done)}</div>`:''}</td>
     <td class="small">${esc(f.note||'')} <span style="color:var(--err)">${esc(f.status==='done'?'':(f.last_error||''))}</span>
     ${f.gd_id?`<div><a target="_blank" href="https://drive.google.com/file/d/${esc(f.gd_id)}/view">открыть на Drive</a></div>`:''}
     ${f.preview_id?`<div><a target="_blank" href="https://drive.google.com/file/d/${esc(f.preview_id)}/view">превью на Drive</a></div>`:''}</td>
-    <td style="white-space:nowrap">${f.status==='error'||f.status==='skipped'||waiting?`<button title="Повторить сейчас" onclick="fa(${f.id},'retry')">↻</button>`:''}
-    ${f.status==='pending'||f.status==='error'||f.status==='buffered'?`<button title="Пропустить" onclick="fa(${f.id},'skip')">⏭</button>`:''}
+    <td style="white-space:nowrap">${f.status==='error'||f.status==='skipped'||f.status==='deferred'||waiting?`<button title="Повторить сейчас" onclick="fa(${f.id},'retry')">↻</button>`:''}
+    ${f.status==='pending'||f.status==='error'||f.status==='buffered'||f.status==='deferred'?`<button title="Пропустить" onclick="fa(${f.id},'skip')">⏭</button>`:''}
     ${f.status==='done'?`<button title="Загрузить заново" onclick="fa(${f.id},'requeue')">⟲</button>`:''}</td></tr>`;
   }).join('');
 }

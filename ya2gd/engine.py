@@ -35,7 +35,7 @@ import traceback
 from . import winsys
 from .core import Log, Settings, data_dir
 from .db import DB, FOREVER
-from .fetch import DEAD, StorageDown, open_download
+from .fetch import DEAD, Overloaded, StorageDown, open_download
 from .gdrive import API as GOOGLE_API, APP_PROP, DriveClient, GoogleAuth
 from .http_util import (ApiError, AuthError, FatalPause, LocalDiskError, NETWORK_ERRORS, RateLimited,
                         WebAuthError, backoff, session)
@@ -47,11 +47,14 @@ GB = 2 ** 30
 MB = 2 ** 20
 BUF_UNIT = int(os.environ.get("YA2GD_BUFFER_UNIT", str(GB)))        # «гигабайт» буфера (в тестах — меньше)
 YA_COOLDOWN = float(os.environ.get("YA2GD_YA_COOLDOWN", "60"))      # первая пауза после «слишком часто»
-DEFER_SEC = float(os.environ.get("YA2GD_DEAD_HOST_TTL", "1800"))
-DEFER_CAP = 6 * 3600
-PREVIEW_AFTER = int(os.environ.get("YA2GD_PREVIEW_AFTER", "2"))   # после стольких откладываний — превью
+API_COOLDOWN = float(os.environ.get("YA2GD_API_COOLDOWN", "20"))    # пауза, когда Яндекс не выдаёт ссылки
+RETRY_SOON = float(os.environ.get("YA2GD_RETRY_SOON", "20"))        # единственный быстрый повтор после сбоя
+RETRY_PAUSE = float(os.environ.get("YA2GD_RETRY_PAUSE", "3"))       # пауза перед докачкой после обрыва
+# «Предохранитель»: столько отказов подряд и ни одного удачного скачивания за BREAKER_QUIET секунд —
+# значит, лежит весь Яндекс, а не отдельные файлы: файлы не откладываем, а ставим паузу.
+BREAKER_STREAK = int(os.environ.get("YA2GD_BREAKER_STREAK", "30"))
+BREAKER_QUIET = float(os.environ.get("YA2GD_BREAKER_QUIET", "180"))
 RAM_QUEUE_MB = int(os.environ.get("YA2GD_RAM_QUEUE_MB", "256"))
-STOP_ERRORS = (AuthError, FatalPause, RateLimited, StorageDown, WebAuthError, LocalDiskError)
 MEDIA_EXT = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/heic": ".heic",
              "image/avif": ".avif"}
 
@@ -60,9 +63,33 @@ class Paused(Exception):
     pass
 
 
+class LinkDown(ApiError):
+    """Яндекс не выдал ссылку на скачивание из-за сбоя у себя (5xx, сеть) — виноват не файл."""
+
+
+def _link_error(e):
+    """Ошибка получения ссылки: беда этого файла (→ «Отложенные») или сбой Яндекса (→ LinkDown)."""
+    if isinstance(e, (StorageDown, LinkDown)) or e.status == 404:
+        return e
+    if e.retryable or e.status is None or e.status >= 500:
+        return LinkDown(f"Яндекс не выдал ссылку на скачивание: {e}", status=e.status, service="yandex")
+    return StorageDown(None, f"Яндекс не выдал ссылку на файл: {e}")
+
+
+def _unavailable(e, tries):
+    """Яндекс перестал отдавать файл посреди скачивания или не начал вовсе — файл в «Отложенные»."""
+    if isinstance(e, StorageDown):
+        return e
+    return StorageDown(None, f"Яндекс не отдал файл целиком ({tries} попыт.): {e}", network=is_network(e))
+
+
 class Mismatch(ApiError):
     """Google принял файл, но размер/MD5 не тот: файл удалён с Drive. Следующая попытка — с нуля,
     новой сессией загрузки (а не дозаливкой в старую)."""
+
+
+# Ошибки, которые нельзя «повторить на месте»: их разбирает _failed (пауза, откладывание, остановка)
+STOP_ERRORS = (AuthError, FatalPause, RateLimited, StorageDown, WebAuthError, LocalDiskError, LinkDown)
 
 
 def name_date(name):
@@ -328,6 +355,13 @@ class Engine:
             self.db.set("scan.state", "interrupted")
         self._keep_started_layout()
         self.sync_sections()
+        # Версия 2 откладывала недоступные файлы «на потом» и сама повторяла их по кругу — теперь это список
+        # «Отложенные» с ручным повтором.
+        n = self.db.x("UPDATE files SET status='deferred', next_try=0, note='Яндекс не отдал файл — отложен' "
+                      "WHERE status='pending' AND defers>0 AND next_try>?", (time.time(),))
+        if n:
+            self.log(f"{n} файлов, которые Яндекс раньше не отдал, перенесены в список «Отложенные» "
+                     f"(повторить — кнопкой «Повторить отложенные и ошибки»)")
 
         self.lock = threading.RLock()
         self.buffer_lock = threading.Lock()
@@ -339,7 +373,12 @@ class Engine:
         self.pause_reason = ""
         self.active = {}
         self.ya_cooldown_until = self.g_cooldown_until = 0
-        self.ya_hits = self.g_hits = 0
+        self.ya_hits = self.g_hits = self.api_hits = 0
+        self._ya_last_limit = 0
+        self._last_ya_success = time.time()
+        self._fail_streak = []
+        self._link_fails = []
+        self.deferred_now = 0             # сколько файлов отложено за этот запуск переноса
         self.speed = {"yandex": collections.deque(), "google": collections.deque()}
         self.offline_since = 0
         self._net_checked = 0
@@ -661,10 +700,7 @@ class Engine:
             if not s["google_refresh_token"]:
                 raise AuthError("Сначала авторизуйтесь в Google")
             self.buffer = None
-            if s["buffer_dir"]:
-                b = Buffer(s["buffer_dir"])
-                b.prepare()
-                self.buffer = b
+            self.apply_buffer()
             self._recover_buffer()
             self.stop_transfer.clear()
             self.transfer_state = "running"
@@ -672,6 +708,10 @@ class Engine:
             self.ya_cooldown_until = self.g_cooldown_until = 0
             self.offline_since = 0
             self.web_problem = ""
+            self.deferred_now = 0
+            self._fail_streak = []
+            self._link_fails = []
+            self._last_ya_success = time.time()
             self.db.set("transfer.wanted", 1)
             self.gate.configure(s["yandex_streams_max"], s["yandex_adaptive"])
             self.downloaders = [threading.Thread(target=self._downloader, args=(i,), daemon=True, name=f"ya{i}")
@@ -688,6 +728,22 @@ class Engine:
                      f"({'подбираются автоматически' if s['yandex_adaptive'] else 'фиксировано'}), "
                      f"к Google — {s['google_streams']}; {buf}")
             return True
+
+    def apply_buffer(self):
+        """Папка буфера из настроек — сразу, без перезапуска переноса (новые файлы пойдут уже через неё)."""
+        s = self.settings
+        with self.buffer_lock:
+            if not s["buffer_dir"]:
+                if self.buffer:
+                    self.log("Буфер на диске выключен: дальше маленькие файлы ждут в памяти, большие идут напрямую")
+                self.buffer = None
+                return
+            b = Buffer(s["buffer_dir"])
+            if self.buffer and self.buffer.base == b.base:
+                return
+            b.prepare()
+            self.buffer = b
+        self.log(f"Буфер на диске включён: {b.base} (до {s['buffer_gb']} ГБ) — новые файлы пойдут через него")
 
     def transferring(self):
         return any(t.is_alive() for t in self.downloaders + self.uploaders) or \
@@ -758,8 +814,11 @@ class Engine:
                 else:
                     self.transfer_state = "done"
                     self.db.set("transfer.wanted", 0)
-                    self.log(f"Перенос завершён. Перенесено и сверено: {st.get('done', {}).get('count', 0)}, "
-                             f"ошибок: {st.get('error', {}).get('count', 0)}")
+                    dfr = st.get("deferred", {})
+                    self.log(f"Проход завершён. Перенесено и сверено: {st.get('done', {}).get('count', 0)}; "
+                             f"отложено (Яндекс не отдал): {dfr.get('count', 0)} ({dfr.get('bytes', 0) / GB:.1f} ГБ); "
+                             f"ошибок: {st.get('error', {}).get('count', 0)}. Отложенные можно повторить кнопкой "
+                             f"«Повторить отложенные и ошибки» — например, когда Яндекс восстановит серверы.")
         winsys.allow_sleep()
         if winsys.WIN:
             winsys.set_title(self._title())
@@ -865,13 +924,25 @@ class Engine:
                 self.log("Похоже, пропал интернет. Жду, пока он появится; попытки при этом не тратятся.", "warn")
 
     def _yandex_limited(self, e):
+        """429 / капча: Яндекс просит притормозить."""
+        now = time.time()
         with self.lock:
+            if now - self._ya_last_limit > 600:
+                self.ya_hits = 0               # давно не жаловался — начинаем с короткой паузы
+            self._ya_last_limit = now
             self.ya_hits += 1
-            delay = int(min(1800, YA_COOLDOWN * 2 ** (self.ya_hits - 1)))
-            self.ya_cooldown_until = max(self.ya_cooldown_until, time.time() + delay)
+            delay = int(min(600, YA_COOLDOWN * 2 ** (self.ya_hits - 1)))
+            self.ya_cooldown_until = max(self.ya_cooldown_until, now + delay)
         self.gate.throttled()
-        self.log(f"{e}. Скачивание с Яндекса — пауза {delay // 60} мин {delay % 60} с "
-                 f"(загрузка в Google продолжается)", "warn")
+        self.log(f"{e}. Скачивание с Яндекса — пауза {_dur(delay)} (загрузка в Google продолжается)", "warn")
+
+    def _yandex_unreachable(self, why):
+        """Яндекс целиком не выдаёт ссылки/файлы: пауза скачивания, файлы при этом не трогаем."""
+        with self.lock:
+            self.api_hits += 1
+            delay = int(min(600, API_COOLDOWN * 2 ** (self.api_hits - 1)))
+            self.ya_cooldown_until = max(self.ya_cooldown_until, time.time() + delay)
+        self.log(f"{why}. Скачивание с Яндекса — пауза {_dur(delay)}, потом продолжу сам", "warn")
 
     def _google_limited(self, e):
         with self.lock:
@@ -882,7 +953,7 @@ class Engine:
         if delay >= 900:
             extra = (" Похоже на суточный лимит Google (≈750 ГБ загрузки в сутки на аккаунт) — "
                      "программа сама продолжит позже.")
-        self.log(f"{e}. Загрузка в Google — пауза {delay // 60} мин {delay % 60} с "
+        self.log(f"{e}. Загрузка в Google — пауза {_dur(delay)} "
                  f"(скачивание с Яндекса продолжается, пока есть место в буфере).{extra}", "warn")
 
     def _add_speed(self, side, n):
@@ -893,7 +964,9 @@ class Engine:
             while dq and dq[0][0] < now - 60:
                 dq.popleft()
             if side == "yandex":
-                self.ya_hits = 0
+                self.api_hits = 0
+                self._last_ya_success = now
+                self._fail_streak.clear()
             else:
                 self.g_hits = 0
 
@@ -904,9 +977,6 @@ class Engine:
         if not items:
             return 0
         return sum(n for _, n in items) / max(5.0, now - items[0][0])
-
-    def _defer_delay(self, defers):
-        return min(DEFER_CAP, DEFER_SEC * 2 ** (defers // 2))
 
     # ================================================================== скачивание с Яндекса
     def _downloader(self, i):
@@ -984,7 +1054,8 @@ class Engine:
             self.active.pop(key, None)
 
     def _failed(self, row, e, side):
-        """Разбор неудачи: отложить, притормозить, поставить на паузу или посчитать попытку."""
+        """Разбор неудачи. Главное: недоступный на Яндексе файл не крутится по кругу, а сразу уходит
+        в «Отложенные» — его можно повторить вручную. Пауза — только когда виноват не файл, а связь целиком."""
         fid = row["id"]
         if isinstance(e, _Requeued):
             return
@@ -992,13 +1063,15 @@ class Engine:
         if isinstance(e, Paused):
             self.db.update_file(fid, status=back)
         elif isinstance(e, StorageDown):
-            defers = (row.get("defers") or 0) + 1
-            delay = self._defer_delay(defers)
-            self.db.update_file(fid, status="pending", next_try=time.time() + delay, defers=defers,
-                                last_error=str(e), note="ждёт сервер Яндекса")
-            self.log(f"«{row['name']}»: {e} (повтор через {_dur(delay)})", "warn")
-            if defers == PREVIEW_AFTER or (defers > PREVIEW_AFTER and defers % 6 == 0):
-                self._try_preview(row)
+            if e.network and not self._online():
+                if e.host:
+                    DEAD.forget(e.host)         # виноват не сервер Яндекса, а пропавший интернет
+                self.db.update_file(fid, status=back, last_error=f"нет интернета: {e}")
+                self._went_offline()
+            else:
+                self._defer(row, str(e))
+        elif isinstance(e, LinkDown):
+            self._link_down(row, e)
         elif isinstance(e, WebAuthError):
             self.db.update_file(fid, status=back, last_error=str(e))
             if not self.web_problem:
@@ -1015,70 +1088,137 @@ class Engine:
             self.db.update_file(fid, status=back, last_error=f"нет интернета: {e}")
             self._went_offline()
         else:
-            if side == "yandex" and getattr(e, "service", "yandex") != "google" and \
-                    (is_network(e) or (isinstance(e, ApiError) and (e.status or 0) >= 500)):
-                self.gate.error()
+            if isinstance(e, Overloaded):
+                self.gate.overload()
             attempts = row["attempts"] + 1
             permanent = isinstance(e, ApiError) and e.status in (404, 416)
             final = permanent or attempts >= self.settings["max_attempts"]
-            if final:
+            yandex_side = side == "yandex" and getattr(e, "service", None) != "google"
+            if final and yandex_side and not permanent:
+                self.db.update_file(fid, attempts=attempts)
+                self._defer(row, str(e))
+            elif final:
                 hours = self.settings["auto_retry_hours"]
                 nxt = FOREVER if permanent or not hours else time.time() + hours * 3600
-                status = "error"
+                if row.get("local_path"):
+                    _remove(row["local_path"])      # не держать место в буфере
+                self.db.update_file(fid, status="error", attempts=attempts, last_error=str(e)[:1000],
+                                    next_try=nxt, local_path=None,
+                                    note="нет на Яндексе" if permanent else None)
+                self.log(f"Ошибка «{row['path']}»: {e}. Файл в списке «Ошибки» — повторить можно вручную.",
+                         "error")
             else:
-                nxt = time.time() + backoff(attempts, base=30, cap=1800)
-                status = back
-            if final and row.get("local_path"):
-                _remove(row["local_path"])          # не держать место в буфере до следующего повтора
-                self.db.update_file(fid, local_path=None)
-            self.db.update_file(fid, status=status, attempts=attempts, last_error=str(e)[:1000], next_try=nxt)
-            if final:
-                again = "" if nxt >= FOREVER else f" Повторю сам в {time.strftime('%H:%M', time.localtime(nxt))}."
-                self.log(f"Ошибка «{row['path']}»: {e}.{again}", "error")
-                if not permanent and is_media(row):
-                    self._try_preview(row)
-            else:
-                self.log(f"Сбой «{row['path']}»: {e} — повтор через {_dur(nxt - time.time())} "
-                         f"(попытка {attempts} из {self.settings['max_attempts']})", "warn")
+                nxt = time.time() + (60 if isinstance(e, Overloaded) else RETRY_SOON)
+                self.db.update_file(fid, status=back, attempts=attempts, last_error=str(e)[:1000], next_try=nxt)
+                self.log(f"Сбой «{row['path']}»: {e} — ещё одна попытка через {_dur(nxt - time.time())}", "warn")
             if not isinstance(e, ApiError):
                 self.log(traceback.format_exc(), "debug")
 
-    def _open_source(self, row, offset, y=None, w=None):
-        """Поток файла с Яндекса с байта offset. «Файлы» — через API, при отказе API — через веб-версию."""
-        stop = self.stop_transfer
-        if row["source"] == "photounlim" and self.photounlim_mode() == "web":
-            w = w or self.yaweb(stop)
-            return open_download(w.file_url(row["path"]), offset, sess=w.session(), reject_pages=True)
-        y = y or self.yandex(stop)
-        cookies = self.settings["yandex_cookies"] and not self.web_problem
-        if row["source"] == "disk" and cookies and (self.rest_broken or not self.settings["yandex_token"]):
-            w = w or self.yaweb(stop)
-            return open_download(w.file_url(row["path"]), offset, sess=w.session(), reject_pages=True)
+    def _defer(self, row, reason):
+        """Яндекс не отдал файл — в «Отложенные». Автоматически больше не берём: только по кнопке «Повторить»."""
+        fid = row["id"]
+        keep = self._keep_partial(row)
+        self.db.update_file(fid, status="deferred", next_try=0, defers=(row.get("defers") or 0) + 1,
+                            last_error=reason[:1000], note="Яндекс не отдал файл — отложен",
+                            **({} if keep else {"local_path": None}))
+        self.log(f"Отложен «{row['path']}»: {reason}", "warn")
+        trip = None
+        with self.lock:
+            self.deferred_now += 1
+            self._fail_streak.append(fid)
+            if len(self._fail_streak) >= BREAKER_STREAK and time.time() - self._last_ya_success > BREAKER_QUIET:
+                trip = list(self._fail_streak)
+                self._fail_streak.clear()
+            elif len(self._fail_streak) > 1000:
+                del self._fail_streak[:500]
+        if trip:
+            # Подряд много отказов и давно ни одного удачного скачивания: похоже, Яндекс лежит целиком.
+            # Эти файлы не виноваты — возвращаем их в очередь и делаем паузу.
+            qs = ",".join("?" * len(trip))
+            self.db.x(f"UPDATE files SET status='pending', note=NULL, defers=MAX(defers-1,0) "
+                      f"WHERE status='deferred' AND id IN ({qs})", trip)
+            self._yandex_unreachable(f"Подряд {len(trip)} файлов не скачались, а за {_dur(BREAKER_QUIET)} не "
+                                     f"скачалось ничего — похоже, Яндекс сейчас не отдаёт файлы вообще; "
+                                     f"эти файлы возвращены в очередь")
+
+    def _keep_partial(self, row):
+        """Оставлять ли недокачанную часть в буфере для ручного повтора: да, если она не мешает остальным."""
+        part = row.get("local_path")
+        if not part or not part.endswith(".part") or not self.buffer:
+            if part:
+                _remove(part)
+            return False
         try:
-            href = y.download_href(row["path"])
-        except RateLimited:
+            have = os.path.getsize(part)
+        except OSError:
+            return False
+        held = 0
+        for r in self.db.q("SELECT local_path FROM files WHERE status='deferred' AND local_path IS NOT NULL"):
+            try:
+                held += os.path.getsize(r["local_path"])
+            except OSError:
+                pass
+        if have >= 64 * MB and held + have <= self.settings["buffer_gb"] * BUF_UNIT // 4:
+            return True
+        _remove(part)
+        return False
+
+    def _link_down(self, row, e):
+        """Яндекс не выдал ссылку из-за сбоя у себя (5xx, сеть): если так у многих файлов — пауза всему."""
+        fid = row["id"]
+        attempts = row["attempts"] + 1
+        if attempts >= 3:
+            self.db.update_file(fid, attempts=attempts)
+            self._defer(row, str(e))
+            return
+        self.db.update_file(fid, status="pending", attempts=attempts, last_error=str(e)[:1000],
+                            next_try=time.time() + 60)
+        now = time.time()
+        with self.lock:
+            self._link_fails = [t for t in self._link_fails if t > now - 60] + [now]
+            many = len(self._link_fails) >= 3
+            if many:
+                self._link_fails = []
+        if many:
+            self._yandex_unreachable(f"Яндекс не выдаёт ссылки на скачивание ({e})")
+
+    def _link(self, row):
+        """(ссылка, HTTP-сессия, это_веб_версия). «Файлы» — через API, при отказе API — через сайт."""
+        stop = self.stop_transfer
+        cookies = bool(self.settings["yandex_cookies"]) and not self.web_problem
+        web = (row["source"] == "photounlim" and self.photounlim_mode() == "web") or \
+            (row["source"] == "disk" and cookies and (self.rest_broken or not self.settings["yandex_token"]))
+        if web:
+            w = self.yaweb(stop)
+            return self._web_link(row, w), w.session(), True
+        try:
+            return self.yandex(stop).download_href(row["path"]), None, False
+        except (RateLimited, AuthError):
             raise
         except ApiError as e:
             if e.status == 404:
                 raise
             if row["source"] == "disk" and cookies:
-                w = w or self.yaweb(stop)
                 if e.status == 410 and not self.rest_broken:
                     self.rest_broken = str(e)
                     self.log(f"API Яндекса не отдаёт файлы ({e}) — дальше «Файлы» беру через веб-версию", "warn")
-                elif e.status != 410:
-                    self.log(f"«{row['name']}»: API Яндекса не дал ссылку ({e}) — беру через веб-версию", "warn")
-                try:
-                    return open_download(w.file_url(row["path"]), offset, sess=w.session(), reject_pages=True)
-                except (WebAuthError, RateLimited, StorageDown):
-                    raise
-                except ApiError:
-                    if e.status != 410:
-                        raise
-            if e.status == 410:
-                raise StorageDown(None, f"Яндекс сейчас не отдаёт файл ({e}) — файл отложен")
+                w = self.yaweb(stop)
+                return self._web_link(row, w), w.session(), True
+            raise _link_error(e)
+
+    @staticmethod
+    def _web_link(row, w):
+        try:
+            return w.file_url(row["path"])
+        except (WebAuthError, RateLimited):
             raise
-        return open_download(href, offset)
+        except ApiError as e:
+            raise _link_error(e)
+
+    def _open_source(self, row, offset):
+        """Поток файла с Яндекса с байта offset."""
+        url, sess, web = self._link(row)
+        return open_download(url, offset, sess=sess, reject_pages=web)
 
     def _download_one(self, row, info):
         s = self.settings
@@ -1088,9 +1228,10 @@ class Engine:
             _remove(row["local_path"])      # буфер выключили или уменьшили — файл пойдёт напрямую
             self.db.update_file(row["id"], local_path=None)
             row["local_path"] = None
-        if s["skip_existing"] and not row["upload_uri"] and not row["local_path"]:
-            if self._existing_check(row, info):
-                return
+        started = row["upload_uri"] or (row["local_path"] and os.path.exists(row["local_path"])
+                                        and os.path.getsize(row["local_path"]) > 0)
+        if s["skip_existing"] and not started and self._existing_check(row, info):
+            return              # уже лежит на Drive — с Яндекса не качаем (в т.ч. в режиме буфера)
         if row["local_path"]:
             self._download_to_buffer(row, info)
         elif row["size"] <= chunk and not row["upload_uri"]:
@@ -1112,7 +1253,7 @@ class Engine:
         try:
             drive = self.drive(self.stop_transfer)
             parent = drive.ensure_folder(drive_dir_for(row, self.settings))
-            fid = self._find_existing(drive, parent, row, fresh=row["attempts"] > 0)
+            fid = self._find_existing(drive, parent, row)
         except (AuthError, FatalPause):
             raise
         except RateLimited as e:
@@ -1122,25 +1263,34 @@ class Engine:
             self.log(f"Проверка дублей «{row['name']}» не удалась ({e}) — проверю перед загрузкой", "debug")
             return False
         if fid:
+            if row["local_path"]:
+                _remove(row["local_path"])
             self._mark_existing(row, fid)
             return True
         return False
 
     def _download_to_memory(self, row, info):
-        """Маленький файл целиком в память; MD5 сверяется с Яндексом."""
+        """Маленький файл целиком в память; MD5 сверяется с Яндексом.
+        Повтор — только если в прошлый раз байты шли (обрыв посреди), не больше трёх попыток."""
         size = row["size"]
         stop = self.stop_transfer
-        for attempt in range(6):
+        if not size:
+            return b""
+        tries = 0
+        while True:
             if stop.is_set():
                 raise Paused()
+            got = [0]
+
+            def progress(n, d):
+                got[0] += d
+                info["done"] = n
+                self._add_speed("yandex", d)
             try:
-                if not size:
-                    return b""
                 info["stage"] = "скачивание с Яндекса"
                 stream, _ = self._open_source(row, 0)
                 try:
-                    data = read_exact(stream.raw, size, lambda n, d: (info.__setitem__("done", n),
-                                                                      self._add_speed("yandex", d)))
+                    data = read_exact(stream.raw, size, progress)
                     extra = stream.raw.read(1)
                 finally:
                     stream.close()
@@ -1148,24 +1298,23 @@ class Engine:
                     raise ApiError(f"Яндекс отдал {len(data)}{'+' if extra else ''} байт вместо {size}",
                                    retryable=True)
                 if row["md5"] and hashlib.md5(data).hexdigest() != row["md5"]:
-                    raise ApiError("MD5 скачанного не совпал с Яндексом — скачиваю заново", retryable=True)
+                    raise ApiError("MD5 скачанного не совпал с Яндексом", retryable=True)
                 return data
             except STOP_ERRORS:
                 raise
             except (ApiError, *NETWORK_ERRORS) as e:
                 if isinstance(e, ApiError) and not e.retryable:
                     raise
-                if attempt == 5:
-                    raise
-                if is_network(e):
-                    self.gate.error()
-                delay = backoff(attempt, base=3, cap=60)
-                self.log(f"Сбой скачивания «{row['name']}»: {e} — повтор через {delay:.0f} c", "warn")
-                if stop.wait(delay):
+                tries += 1
+                if not got[0] or tries >= 3:
+                    raise _unavailable(e, tries)
+                self.log(f"Обрыв «{row['name']}»: {e} — сразу ещё раз", "warn")
+                if stop.wait(RETRY_PAUSE):
                     raise Paused()
 
     def _download_to_buffer(self, row, info):
-        """В буфер на диске с докачкой (Range) и сверкой MD5 до загрузки в Google."""
+        """В буфер на диске с докачкой (Range) и сверкой MD5 до загрузки в Google.
+        Пока байты идут — обрывы докачиваются; если Яндекс перестал отдавать — файл откладывается."""
         size, part = row["size"], row["local_path"]
         stop = self.stop_transfer
         h = hashlib.md5()
@@ -1185,12 +1334,13 @@ class Engine:
             f = open(part, "ab")
         except OSError as e:
             raise LocalDiskError(f"Буфер на диске: не удалось открыть {part}: {e}")
-        errors, since_error = 0, 0
+        ever, no_progress, tries = False, 0, 0
         info["done"] = offset
         try:
             while offset < size:
                 if stop.is_set():
                     raise Paused()
+                got = 0
                 try:
                     info["stage"] = "запрашиваю файл у Яндекса"
                     stream, pos = self._open_source(row, offset)
@@ -1213,7 +1363,7 @@ class Engine:
                                                      f"Проверьте место на диске и папку буфера.")
                             h.update(block)
                             offset += len(block)
-                            since_error += len(block)
+                            got += len(block)
                             info["done"] = offset
                             self._add_speed("yandex", len(block))
                     finally:
@@ -1226,17 +1376,16 @@ class Engine:
                 except (ApiError, *NETWORK_ERRORS) as e:
                     if isinstance(e, ApiError) and not e.retryable:
                         raise
-                    if since_error >= 8 * MB:
-                        errors = 0
-                    since_error = 0
-                    errors += 1
-                    if errors > 8:
-                        raise
-                    self.gate.error()
-                    delay = backoff(errors, base=3, cap=120)
-                    self.log(f"Обрыв «{row['name']}» на {offset / MB:.1f} МБ: {e}. Докачаю с этого места "
-                             f"через {delay:.0f} c", "warn")
-                    if stop.wait(delay):
+                    tries += 1
+                    if got:
+                        ever, no_progress = True, 0
+                    else:
+                        no_progress += 1
+                    if (not ever and no_progress) or no_progress >= 2 or tries > 30:
+                        f.flush()
+                        raise _unavailable(e, tries)
+                    self.log(f"Обрыв «{row['name']}» на {offset / MB:.1f} МБ: {e}. Докачиваю с этого места", "warn")
+                    if stop.wait(RETRY_PAUSE):
                         raise Paused()
             f.flush()
             os.fsync(f.fileno())
@@ -1244,8 +1393,7 @@ class Engine:
             f.close()
         if row["md5"] and h.hexdigest() != row["md5"]:
             _remove(part)
-            raise ApiError("MD5 скачанного в буфер не совпал с Яндексом — файл будет скачан заново",
-                           retryable=True)
+            raise ApiError("MD5 скачанного в буфер не совпал с Яндексом", retryable=True)
         final = part[:-5] + ".dat" if part.endswith(".part") else part
         try:
             os.replace(part, final)
@@ -1268,7 +1416,8 @@ class Engine:
             self.db.update_file(row["id"], upload_uri=uri, bytes_done=0)
         offset = None
         stream = None
-        errors = 0
+        g_errors, tries, no_progress, ever = 0, 0, 0, False
+        ya_got = [0]                       # байт пришло с Яндекса с последнего открытия потока
         try:
             while True:
                 if stop.is_set():
@@ -1295,6 +1444,7 @@ class Engine:
                             stream = None
                     if stream is None:
                         info["stage"] = "запрашиваю файл у Яндекса"
+                        ya_got[0] = 0
                         stream, pos = self._open_source(row, offset)
                         if pos < offset:
                             skipped = read_exact(stream.raw, offset - pos)
@@ -1304,6 +1454,7 @@ class Engine:
                     info["stage"] = "Яндекс → Google напрямую"
                     base = offset
                     buf = read_exact(stream.raw, want, lambda n, d: (info.__setitem__("done", base + n),
+                                                                     ya_got.__setitem__(0, ya_got[0] + d),
                                                                      self._add_speed("yandex", d)))
                     if len(buf) != want:
                         raise ApiError(f"Яндекс оборвал поток ({len(buf)} из {want} байт)", retryable=True)
@@ -1323,19 +1474,29 @@ class Engine:
                     offset = val
                     info["done"] = offset
                     self.db.update_file(row["id"], bytes_done=offset)
-                    errors = 0
+                    g_errors = 0
                 except STOP_ERRORS:
                     raise
                 except (ApiError, *NETWORK_ERRORS) as e:
                     if isinstance(e, ApiError) and not e.retryable:
                         raise
-                    errors += 1
-                    if errors > 8:
-                        raise ApiError(f"Слишком много сбоев подряд: {e}", retryable=True,
-                                       service=getattr(e, "service", None))
-                    if getattr(e, "service", None) != "google":
-                        self.gate.error()
-                    delay = backoff(errors, base=3, cap=120)
+                    if getattr(e, "service", None) == "google":
+                        # Google надёжен и докачивается с подтверждённого места — тут можно потерпеть
+                        g_errors += 1
+                        if g_errors > 8:
+                            raise ApiError(f"Google: слишком много сбоев подряд: {e}", retryable=True,
+                                           service="google")
+                        delay = backoff(g_errors, base=3, cap=60)
+                    else:
+                        # Яндекс: докачиваем, пока байты идут; перестал отдавать — файл в «Отложенные»
+                        tries += 1
+                        if ya_got[0]:
+                            ever, no_progress = True, 0
+                        else:
+                            no_progress += 1
+                        if (not ever and no_progress) or no_progress >= 2 or tries > 30:
+                            raise _unavailable(e, tries)
+                        delay = RETRY_PAUSE
                     self.log(f"Сбой при передаче «{row['name']}»: {e}. Продолжу с подтверждённого "
                              f"места через {delay:.0f} c", "warn")
                     if stream is not None:
@@ -1520,7 +1681,13 @@ class Engine:
                 return fid
         return None
 
+    def _count_buffered(self, row):
+        if (row.get("local_path") or "").endswith(".dat"):
+            self.db.incr("buffer.files")
+            self.db.incr("buffer.bytes", row["size"])
+
     def _mark_existing(self, row, fid, note="уже был на Drive", uploaded=0):
+        self._count_buffered(row)
         self._cleanup_after_done(row)
         self.db.update_file(row["id"], status="done", gd_id=fid, bytes_done=row["size"], upload_uri=None,
                             last_error=None, note=note, local_path=None, done_at=time.time(), uploaded=uploaded,
@@ -1542,6 +1709,7 @@ class Engine:
             raise Mismatch("Размер на Drive не совпал — файл удалён с Drive, будет загружен заново",
                            service="google")
         self.folder_index.add(parent, row["name"], f["id"], gmd5, row["size"])
+        self._count_buffered(row)
         self._cleanup_after_done(row, drive)
         self.db.update_file(row["id"], status="done", gd_id=f["id"], upload_uri=None, local_path=None,
                             bytes_done=row["size"], last_error=None, note=None, done_at=time.time(),
@@ -1561,7 +1729,7 @@ class Engine:
     def _try_preview(self, row):
         """Оригинал не отдаётся — сохранить хотя бы самое крупное превью в отдельную папку на Drive."""
         s = self.settings
-        if not s["save_previews"] or row.get("preview_id") or not is_media(row):
+        if row.get("preview_id") or not is_media(row):
             return False
         if self.g_cooldown_until > time.time() or not s["google_refresh_token"]:
             return False
@@ -1659,8 +1827,7 @@ class Engine:
     def rescue_previews(self):
         """Для всех файлов, которые Яндекс сейчас не отдаёт, — сохранить превью."""
         def fn():
-            rows = self.db.q("SELECT * FROM files WHERE preview_id IS NULL AND "
-                             "((status='pending' AND next_try>?) OR status='error')", (time.time(),))
+            rows = self.db.q("SELECT * FROM files WHERE preview_id IS NULL AND status IN ('deferred','error')")
             rows = [dict(r) for r in rows if is_media(dict(r))]
             ok = 0
             for i, r in enumerate(rows):
@@ -1669,14 +1836,16 @@ class Engine:
             return f"превью сохранено для {ok} из {len(rows)} недоступных фото/видео"
         self.run_task("Спасение превью", fn, allow_during_transfer=True)
 
-    def report_csv(self):
+    def report_csv(self, only=None):
         out = io.StringIO()
         wr = csv.writer(out, delimiter=";")
         wr.writerow(["Путь на Яндексе", "Раздел", "Размер, байт", "MD5 Яндекса", "Статус", "Проверено (MD5 совпал)",
                      "Папка на Google Drive", "Ссылка", "Превью вместо оригинала", "Ошибка/примечание"])
         st_names = {"pending": "в очереди", "active": "в работе", "buffered": "в буфере", "uploading": "в работе",
-                    "done": "готово", "error": "ошибка", "skipped": "пропущен"}
-        for r in self.db.q("SELECT * FROM files ORDER BY source, path"):
+                    "done": "готово", "error": "ошибка", "skipped": "пропущен", "deferred": "отложен"}
+        rows = self.db.q("SELECT * FROM files WHERE status=? ORDER BY source, path", (only,)) if only else \
+            self.db.q("SELECT * FROM files ORDER BY source, path")
+        for r in rows:
             r = dict(r)
             wr.writerow([r["path"], "Фото" if r["source"] == "photounlim" else "Файлы", r["size"], r["md5"] or "",
                          st_names.get(r["status"], r["status"]),
@@ -1688,15 +1857,20 @@ class Engine:
         return "\ufeff" + out.getvalue()      # BOM — чтобы Excel открыл кириллицу
 
     def retry_errors(self):
-        n = self.db.x("UPDATE files SET status='pending', attempts=0, next_try=0 WHERE status='error'")
-        n2 = self.db.x("UPDATE files SET next_try=0 WHERE status IN ('pending','buffered') AND next_try>?",
+        """Кнопка «Повторить отложенные и ошибки»: всё отложенное и с ошибками — снова в очередь, один проход."""
+        n = self.db.x("UPDATE files SET status='pending', attempts=0, next_try=0 "
+                      "WHERE status='error' AND IFNULL(note,'') != 'нет на Яндексе'")
+        n2 = self.db.x("UPDATE files SET status='pending', attempts=0, next_try=0 WHERE status='deferred'")
+        n3 = self.db.x("UPDATE files SET next_try=0 WHERE status IN ('pending','buffered') AND next_try>?",
                        (time.time(),))
         DEAD.clear()
         self.web_problem = ""
         with self.lock:
             self.ya_cooldown_until = self.g_cooldown_until = 0
-        self.log(f"В очередь возвращено: с ошибками {n}, отложенных {n2}")
-        return n + n2
+            self._fail_streak.clear()
+        self.log(f"Снова в очередь: отложенных {n2}, с ошибками {n}" + (f", ждавших повтора {n3}" if n3 else "") +
+                 ". Нажмите «Старт», если перенос не идёт.")
+        return n + n2 + n3
 
     def requeue_all(self):
         if self.busy():
@@ -1727,10 +1901,11 @@ class Engine:
     def file_action(self, fid, action):
         if action == "retry":
             self.db.x("UPDATE files SET status='pending', attempts=0, next_try=0 "
-                      "WHERE id=? AND status IN ('error','skipped','pending')", (fid,))
+                      "WHERE id=? AND status IN ('error','skipped','pending','deferred')", (fid,))
+            DEAD.clear()
         elif action == "skip":
-            r = self.db.q1("SELECT local_path FROM files WHERE id=? AND status IN ('pending','error','buffered')",
-                           (fid,))
+            r = self.db.q1("SELECT local_path FROM files WHERE id=? AND status IN "
+                           "('pending','error','buffered','deferred')", (fid,))
             if r:
                 _remove(r["local_path"])
                 self.db.x("UPDATE files SET status='skipped', note='пропущен вручную', local_path=NULL "
@@ -1755,6 +1930,9 @@ class Engine:
         except OSError:
             pass
         return {"enabled": True, "dir": b.base, "cap": s["buffer_gb"] * BUF_UNIT, "reserved": self.db.buffer_reserved(),
+                "in_use": bool(self.buffer) and self.buffer.base == b.base,
+                "passed_files": int(self.db.get("buffer.files", "0")),
+                "passed_bytes": int(self.db.get("buffer.bytes", "0")),
                 "written": b.written(), "free": free, "disk_total": total,
                 "min_free": s["buffer_min_free_gb"] * BUF_UNIT,
                 "files": self.db.count_status("buffered")}

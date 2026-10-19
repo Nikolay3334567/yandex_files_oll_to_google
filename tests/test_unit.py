@@ -38,7 +38,7 @@ def test_gate():
     g.throttled()
     assert g.state()["limit"] == 2
     for _ in range(3):
-        g.error()
+        g.overload()
     assert g.state()["limit"] == 1
     for _ in range(3):
         g.release()
@@ -52,9 +52,14 @@ def test_gate():
     g.release()
     t.join(3)
     assert got == [True]
+    g.release()
+    g.configure(8, adaptive=True)        # новый «Старт» — снова со стартового числа, а не с 1
+    assert g.state()["limit"] == 3 and g.state()["max"] == 8
     g.configure(5, adaptive=False)
     assert g.state()["limit"] == 5
-    print("OK автоподбор потоков к Яндексу: растёт по одному, при 429 — вдвое меньше, при сбоях — минус один")
+    assert not hasattr(g, "error")       # недоступные файлы больше не уменьшают число потоков
+    print("OK автоподбор потоков: растёт по одному, вдвое меньше только на 429, минус один на 503; "
+          "недоступные файлы потоки не отнимают")
 
 
 def test_settings_migration():
@@ -69,10 +74,19 @@ def test_settings_migration():
         assert s["files_root"] == "Yandex Disk" and s["photos_root"] == "Yandex Disk/Фото (безлимит)"
         assert s["photos_split"] == "year" and s["yandex_streams_max"] == 8 and s["yandex_token"] == "t"
         assert s["photos_from_disk"] == "none"     # «Фотокамера» у старых установок остаётся в «Файлах»
+        assert s["max_attempts"] == 2 and s["auto_retry_hours"] == 0 and s["yandex_streams_max"] == 8
         s.update(photos_root=" Архив \\ Фото/ ", buffer_gb="25", yandex_streams_max=99)
         assert s["photos_root"] == "Архив/Фото" and s["buffer_gb"] == 25 and s["yandex_streams_max"] == 16
         s2 = Settings(p)
         assert not s2.migrated and s2["photos_root"] == "Архив/Фото"
+        # версия 2: значения по умолчанию обновляются, а изменённые человеком — нет
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump({"files_root": "Ф", "photos_root": "Фото", "max_attempts": 6, "auto_retry_hours": 3,
+                       "yandex_streams_max": 12, "google_streams": 3, "save_previews": True}, f)
+        s3 = Settings(p)
+        assert (s3["max_attempts"], s3["auto_retry_hours"], s3["yandex_streams_max"], s3["google_streams"]) == \
+            (2, 0, 12, 4), s3.values
+        assert json.load(open(p, encoding="utf-8"))["settings_v"] == 3
         print("OK настройки прежней версии переносятся, папки на Drive остаются прежними")
     finally:
         shutil.rmtree(d, ignore_errors=True)

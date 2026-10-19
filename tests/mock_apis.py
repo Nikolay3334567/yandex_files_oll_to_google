@@ -50,6 +50,8 @@ class State:
                        "e504": [],          # пути файлов, на которые Яндекс отвечает 504
                        "rest_410": False,   # REST API отвечает 410 Gone на «Файлы» (как в октябре 2026)
                        "ya_429": 0,         # сколько раз подряд ответить 429 на ссылку для скачивания
+                       "hang": {},          # путь → сколько секунд «первый» сервер Яндекса молчит перед ответом
+                       "rest_500": False,   # API Яндекса отвечает 500 на запрос ссылки (Яндекс лежит целиком)
                        "web_session": "good-session"}
         self.calls = {"chunks": 0, "mpfs_url": 0, "small_uploads": 0, "previews": 0, "ya_download_links": 0,
                       "ranges": 0, "max_parallel_dl": 0}
@@ -141,6 +143,8 @@ class H(BaseHTTPRequestHandler):
         if p == "/resources/download":
             path = qs["path"]
             S.calls["ya_download_links"] += 1
+            if S.faults["rest_500"]:
+                return self.send_json(500, {"error": "InternalError", "description": "Ошибка сервера"})
             if S.faults["ya_429"] > 0:
                 S.faults["ya_429"] -= 1
                 return self.send_json(429, {"error": "TooManyRequestsError", "description": "Слишком много"})
@@ -154,6 +158,11 @@ class H(BaseHTTPRequestHandler):
         """Как downloader.disk.yandex.ru: редирект на сервер хранения."""
         port = self.server.server_address[1]
         p = qs["p"]
+        hang = S.faults["hang"].get(p)
+        if hang:
+            import time
+            time.sleep(hang)
+            return self.send_json(504, {"error": "gateway timeout"})
         host = "localhost" if p in S.faults["dead"] else "127.0.0.1"   # «молчащий» сервер — другой хост
         self.send_response(302)
         self.send_header("Location", f"http://{host}:{port}/st?" + urllib.parse.urlencode({"p": p}))
@@ -438,6 +447,11 @@ class H(BaseHTTPRequestHandler):
             return self.send_json(200, {})
         if u.path == "/ctl/stats":
             return self.send_json(200, S.calls)
+        if u.path == "/ctl/add_files" and method == "POST":
+            b = json.loads(self.body())
+            for i in range(b["count"]):
+                S.ya[f"{b['prefix']}{i:04d}.bin"] = os.urandom(b.get("size", 20000))
+            return self.send_json(200, {"total": len(S.ya)})
         return self.send_json(404, {})
 
     def route(self, method):

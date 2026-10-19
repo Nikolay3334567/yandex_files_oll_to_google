@@ -164,6 +164,23 @@ def run(name, fn, **extra_env):
         e.close(failed)
 
 
+def deferred(app):
+    return app.get("/api/status")["stats"]["by_status"].get("deferred", {}).get("count", 0)
+
+
+def finish(app, timeout=300, what="transfer"):
+    """Дождаться конца прохода. Если что-то отложено из-за случайных обрывов имитации — повторить
+    отложенные кнопкой, как это сделал бы человек (не больше трёх раз)."""
+    wait_for(lambda: app.state() == "done", timeout, what)
+    rounds = 0
+    while deferred(app) and rounds < 3:
+        rounds += 1
+        app.post("/api/actions/retry_errors")
+        app.post("/api/transfer/start")
+        wait_for(lambda: app.state() == "done", timeout, f"{what} (повтор отложенных {rounds})")
+    return rounds
+
+
 GOOD = {"yandex_token": "good", "google_client_id": "cid", "google_client_secret": "sec",
         "google_refresh_token": "rt-good", "chunk_mb": 1}
 COOKIES = json.dumps([{"name": "Session_id", "value": "good-session", "domain": ".yandex.ru"},
@@ -208,8 +225,8 @@ def scenario_direct(e):
     wait_for(lambda: app.state() in ("paused", "done"), 60, "pause")
     print("OK пауза:", app.state())
     assert app.post("/api/transfer/start")[0] == 200
-    wait_for(lambda: app.state() == "done", 300, "transfer done")
-    assert app.log_has("Докачка «VID_0003.mp4»"), "не было докачки"
+    finish(app, 300, "transfer done")
+    assert app.logfile_has("Докачка «VID_0003.mp4»"), "не было докачки"
     print("OK после перезапуска большой файл докачан с места, подтверждённого Google")
     assert app.logfile_has("Яндекс просит притормозить") and app.logfile_has("Скачивание с Яндекса — пауза"), \
         "на 429 не притормозили"
@@ -225,7 +242,7 @@ def scenario_direct(e):
     total = len(http("GET", M + "/ctl/ya")[1])
     assert "нет на Drive — 1" in msg and f"совпало по размеру и MD5 — {total - 1}" in msg, msg
     app.post("/api/transfer/start")
-    wait_for(lambda: app.state() == "done", 120, "transfer 2")
+    finish(app, 120, "transfer 2")
     check(app, M)
     print("OK удалённый на Drive файл найден сверкой и залит снова:", msg)
 
@@ -267,24 +284,31 @@ def scenario_web(e):
     wait_for(lambda: app.get("/api/status")["scan"]["state"] == "done", 60, "scan")
     app.post("/api/transfer/start")
 
-    def previewed():
-        it = app.get("/api/files?q=IMG_0002")["items"][0]
-        return it["status"] == "pending" and it["preview_id"] and it
-    it = wait_for(previewed, 90, "preview for dead file")
-    assert "ждёт сервер" in (it["last_error"] or "") or it["defers"] >= 1, it
+    wait_for(lambda: app.state() == "done", 120, "web pass")
+    it = app.get("/api/files?q=IMG_0002")["items"][0]
+    assert it["status"] == "deferred" and it["attempts"] == 0 and it["defers"] == 1, it
     st = app.get("/api/status")
-    assert "localhost" in st["dead_hosts"], st["dead_hosts"]
-    drive = e.drive()
-    prev = drive[it["preview_id"]]
+    assert app.logfile_has("сервер хранения Яндекса localhost не отвечает")
+    assert st["stats"]["by_status"]["done"]["count"] == len(http("GET", M + "/ctl/ya")[1]) - 1, st["stats"]
+    assert app.logfile_has("Проход завершён") and app.logfile_has("отложено (Яндекс не отдал): 1")
+    print("OK «молчащий» сервер: файл сразу в «Отложенных», без повторов по кругу; остальное перенесено")
+
+    app.post("/api/actions/previews")           # спасение превью — только по кнопке
+    wait_for(lambda: app.get("/api/status")["task"]["state"] == "done", 60, "previews")
+    it = app.get("/api/files?q=IMG_0002")["items"][0]
+    assert it["preview_id"], (it, app.get("/api/status")["task"])
+    prev = e.drive()[it["preview_id"]]
     assert prev["name"] == "IMG_0002.jpg (превью XXXL).jpg" and not prev["trashed"], prev
-    print("OK «молчащий» сервер распознан, файл отложен без траты попыток, сохранено превью:", prev["name"])
+    print("OK по кнопке сохранено превью недоступного фото:", prev["name"])
 
     e.faults(dead=[])
-    wait_for(lambda: app.state() == "done", 180, "web transfer")
+    app.post("/api/actions/retry_errors")       # «Повторить отложенные и ошибки»
+    app.post("/api/transfer/start")
+    wait_for(lambda: app.state() == "done", 120, "web retry")
     it = app.get("/api/files?q=IMG_0002")["items"][0]
-    assert it["status"] == "done" and it["attempts"] == 0 and not it["preview_id"], it
+    assert it["status"] == "done" and not it["preview_id"], it
     assert it_preview_gone(e, prev["name"]), "превью не удалено после переноса оригинала"
-    print("OK сервер ожил — оригинал перенесён сам, временное превью удалено "
+    print("OK сервер ожил — по кнопке «Повторить» оригинал перенесён, временное превью удалено "
           "(в том числе когда Google «потерял» ответ на загрузку превью)")
     check(app, M)
     calls = e.stats()
@@ -356,12 +380,14 @@ def scenario_buffer(e):
 
     def waits_504():
         it = app.get("/api/files?q=file0.bin")["items"][0]
-        return it["status"] == "pending" and it["defers"] >= 1 and it
+        return it["status"] == "deferred" and it and it
     wait_for(waits_504, 60, "504 deferral")
-    print("OK на 504 от Яндекса файл отложен без траты попыток")
+    print("OK на 504 от Яндекса файл сразу в «Отложенных», попытки не тратятся")
+    wait_for(lambda: app.state() == "done", 240, "buffer pass")
     e.faults(e504=[])
-    http("POST", app.u("/api/actions/retry_errors"), {})
-    wait_for(lambda: app.state() == "done", 240, "buffer transfer")
+    app.post("/api/actions/retry_errors")
+    app.post("/api/transfer/start")
+    finish(app, 240, "buffer transfer")
     check(app, M)
     leftovers = os.listdir(os.path.join(buf, "ya2gd-buffer"))
     assert leftovers == [], leftovers
@@ -371,6 +397,63 @@ def scenario_buffer(e):
     assert app.get("/api/files?q=VID_0003")["items"][0]["status"] == "done"
     print("OK всё перенесено через буфер, видео больше буфера — напрямую; буфер в конце пуст; "
           f"к Яндексу не больше {e.stats()['max_parallel_dl']} потоков одновременно")
+
+
+# ------------------------------------------------------------------------------------------- сценарий 4
+def scenario_dead_many(e):
+    """Как у пользователя: заметная часть файлов недоступна (сгоревшие серверы), и недоступность разная —
+    сервер хранения молчит, 504 после долгого ожидания, «первый» сервер Яндекса зависает. Доступные файлы
+    должны переноситься быстро, недоступные — сразу в «Отложенные», а число потоков — не падать."""
+    app, M = e.app, e.M
+    app.start()
+    http("POST", M + "/ctl/add_files", {"prefix": "disk:/Архив/f", "count": 180, "size": 30000})
+    ya = http("GET", M + "/ctl/ya")[1]
+    extra = sorted(p for p in ya if p.startswith("disk:/Архив/"))
+    dead, e504, hang = extra[0::6], extra[1::6], extra[2::6]      # половина «Архива» недоступна
+    e.faults(dead=dead, e504=e504, hang={p: 30 for p in hang})
+    app.post("/api/settings", dict(GOOD))                          # потоки и попытки — по умолчанию
+    app.post("/api/scan/start", {"fresh": True})
+    wait_for(lambda: app.get("/api/status")["scan"]["state"] == "done", 60, "scan")
+    t0 = time.time()
+    app.post("/api/transfer/start")
+    wait_for(lambda: app.state() == "done", 120, "dead_many pass")
+    took = time.time() - t0
+    st = app.get("/api/status")
+    bs = st["stats"]["by_status"]
+    bad = len(dead) + len(e504) + len(hang)
+    assert bs["deferred"]["count"] == bad, bs
+    assert bs["done"]["count"] == len(ya) - bad, bs
+    stats = e.stats()
+    # каждый недоступный файл запрошен у Яндекса один раз (ссылка), а не по кругу
+    assert stats["ya_download_links"] <= len(ya) + 10, stats
+    gate = st["gate"]
+    assert not app.logfile_has("потоков к Яндексу 4 → 3") and gate["limit"] >= 4, gate
+    print(f"OK {len(ya) - bad} доступных файлов перенесены, {bad} недоступных сразу в «Отложенных» "
+          f"за {took:.0f} с; число потоков к Яндексу не падало (сейчас {gate['limit']})")
+
+    # Яндекс лёг целиком: ни один файл не отдаётся — «предохранитель» не откладывает файлы, а ставит паузу
+    http("POST", M + "/ctl/add_files", {"prefix": "disk:/Позже/g", "count": 40, "size": 1000})
+    ya2 = http("GET", M + "/ctl/ya")[1]
+    later = sorted(p for p in ya2 if p.startswith("disk:/Позже/"))
+    e.faults(dead=dead + later)
+    app.post("/api/scan/start", {"fresh": True})
+    wait_for(lambda: app.get("/api/status")["scan"]["state"] == "done", 60, "scan 2")
+    app.post("/api/transfer/start")
+    wait_for(lambda: app.logfile_has("похоже, Яндекс сейчас не отдаёт файлы вообще"), 60, "breaker")
+    print("OK когда не отдаётся вообще ничего — пауза, а не откладывание всех файлов подряд")
+    # буфер, заданный посреди переноса, включается сразу — без «Пауза → Старт»
+    buf = os.path.join(e.ddir, "Буфер D")
+    app.post("/api/settings", {"buffer_dir": buf, "buffer_gb": 5, "buffer_min_free_gb": 0})
+    wait_for(lambda: app.log_has("Буфер на диске включён"), 20, "buffer hot apply")
+    e.faults(dead=[], e504=[], hang={})
+    app.post("/api/actions/retry_errors")
+    app.post("/api/transfer/start")
+    finish(app, 180, "after outage")
+    check(app, M)
+    b = app.get("/api/status")["buffer"]
+    assert b["in_use"] and b["passed_files"] > 0, b
+    print(f"OK после «восстановления Яндекса» всё перенесено по кнопке «Повторить отложенные»; "
+          f"буфер, включённый на ходу, сразу заработал (через него прошло {b['passed_files']} файлов)")
 
 
 def check(app, M):
@@ -412,8 +495,10 @@ def check(app, M):
 
 if __name__ == "__main__":
     only = [a for a in sys.argv[1:] if not a.startswith("-")]
-    scenarios = [("direct", scenario_direct, {}), ("web", scenario_web, {"YA2GD_PREVIEW_AFTER": "1"}),
-                 ("buffer", scenario_buffer, {"YA2GD_BUFFER_UNIT": str(2 ** 20)})]
+    scenarios = [("direct", scenario_direct, {}), ("web", scenario_web, {}),
+                 ("buffer", scenario_buffer, {"YA2GD_BUFFER_UNIT": str(2 ** 20)}),
+                 ("dead_many", scenario_dead_many, {"YA2GD_FRONT_TIMEOUT": "2", "YA2GD_BREAKER_STREAK": "10",
+                                                    "YA2GD_BREAKER_QUIET": "3", "YA2GD_API_COOLDOWN": "2"})]
     for name, fn, extra in scenarios:
         if only and name not in only:
             continue

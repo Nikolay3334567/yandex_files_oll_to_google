@@ -77,8 +77,10 @@ class Handler(BaseHTTPRequestHandler):
                                               int(qs.get("offset", 0)), min(500, int(qs.get("limit", 100))))
                 return self._send(200, {"total": total, "items": rows})
             if u.path == "/api/report.csv":
-                return self._send(200, e.report_csv(), "text/csv; charset=utf-8",
-                                  {"Content-Disposition": 'attachment; filename="ya2gd-report.csv"'})
+                only = qs.get("status") or None
+                name = f"ya2gd-{only}.csv" if only else "ya2gd-report.csv"
+                return self._send(200, e.report_csv(only), "text/csv; charset=utf-8",
+                                  {"Content-Disposition": f'attachment; filename="{name}"'})
             if u.path == "/oauth/google/start":
                 auth = e.google_auth()
                 if not auth.client_id:
@@ -128,6 +130,8 @@ class Handler(BaseHTTPRequestHandler):
                     clean.setdefault("google_refresh_token", "")
                 e.settings.update(**clean)
                 e.sync_sections()
+                if "buffer_dir" in clean and e.transferring():
+                    e.apply_buffer()            # буфер — сразу, без «Пауза → Старт»
                 if "win_autorun" in clean:
                     winsys.set_autorun(e.settings["win_autorun"])
                 return self._send(200, e.settings.public())

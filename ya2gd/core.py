@@ -27,22 +27,23 @@ DEFAULTS = {
     "include_photounlim": True,
     "include_disk": True,
     "order": "photos_first",              # photos_first | files_first | small_first | as_listed
-    "yandex_streams_max": 6,              # потолок одновременных скачиваний с Яндекса
+    "yandex_streams_max": 8,              # потолок одновременных скачиваний с Яндекса
     "yandex_adaptive": True,              # подбирать число потоков к Яндексу автоматически
-    "google_streams": 3,                  # одновременных загрузок в Google
+    "google_streams": 4,                  # одновременных загрузок в Google
     "buffer_dir": "",                     # папка буфера на диске ('' — без буфера, через память)
     "buffer_gb": 20,
     "buffer_min_free_gb": 3,              # сколько места на диске оставлять свободным всегда
     "chunk_mb": 32,
-    "max_attempts": 6,
-    "auto_retry_hours": 3,                # файлы с ошибкой повторять автоматически (0 — нет)
+    "max_attempts": 2,                    # сбой не по вине Яндекса: одна быстрая повторная попытка
+    "auto_retry_hours": 0,                # повторять ошибки автоматически (0 — только вручную)
     "skip_existing": True,                # не заливать повторно файл, который уже есть на Drive (имя+md5)
     "verify_md5": True,
-    "save_previews": True,                # оригинал недоступен — сохранить хотя бы превью
+    "save_previews": False,               # не используется: превью — только по кнопке (замедляло перенос)
     "autostart": False,                   # при запуске программы продолжать перенос
     "win_autorun": False,                 # запускать программу при входе в Windows
     "app_window": True,                   # открывать интерфейс отдельным окном (Edge/Chrome --app)
     "port": 8765,
+    "settings_v": 3,
 }
 
 SECRET_KEYS = ("yandex_token", "yandex_cookies", "google_client_secret", "google_refresh_token")
@@ -95,9 +96,10 @@ class Settings:
             with open(path, encoding="utf-8") as f:
                 stored = json.load(f)
             self.migrated = _migrate(stored)
+            upgraded = _upgrade_v3(stored)
             self.stored_keys = set(stored)
             self.values.update({k: v for k, v in stored.items() if k in DEFAULTS})
-            if self.migrated:
+            if self.migrated or upgraded:
                 self.update()
 
     def __getitem__(self, k):
@@ -144,6 +146,22 @@ class Settings:
             else:
                 out[k] = v
         return out
+
+
+# Значения по умолчанию версии 2, которые в версии 3 поменялись: недоступные файлы больше не повторяются
+# по кругу, а потоков к Яндексу и Google больше. Меняем, только если человек их сам не трогал.
+V3_DEFAULTS = {"max_attempts": (6, 2), "auto_retry_hours": (3, 0), "yandex_streams_max": (6, 8),
+               "google_streams": (3, 4), "save_previews": (True, False)}
+
+
+def _upgrade_v3(stored):
+    if int(stored.get("settings_v") or 0) >= 3:
+        return False
+    for k, (old, new) in V3_DEFAULTS.items():
+        if stored.get(k, old) == old:
+            stored[k] = new
+    stored["settings_v"] = 3
+    return True
 
 
 def _migrate(stored):

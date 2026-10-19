@@ -155,7 +155,9 @@ class YandexClient:
         return None, report
 
     # ---- скачивание ----
-    def download_href(self, path, tries=4):
+    def download_href(self, path, tries=2):
+        """Ссылка на один файл. Повторов мало: если API не отвечает, программа не ждёт на каждом файле
+        минутами, а ставит паузу всему скачиванию (см. engine._open_source)."""
         if path.startswith("photounlim:"):
             try:
                 data = self._get(f"{API}/resources/download", params={"path": path}, tries=tries,
@@ -166,7 +168,8 @@ class YandexClient:
                 data = self._get(f"{API}/photounlim/resources/download", params={"path": path}, tries=tries,
                                  forbidden_is_auth=False)
         else:
-            data = self._get(f"{API}/resources/download", params={"path": path}, tries=tries)
+            data = self._get(f"{API}/resources/download", params={"path": path}, tries=tries,
+                             forbidden_is_auth=False)
         href = data.get("href")
         if not href:
             raise ApiError(f"Яндекс не выдал ссылку на скачивание: {data}", service="yandex")
