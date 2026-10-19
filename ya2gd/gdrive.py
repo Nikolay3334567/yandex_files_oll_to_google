@@ -123,6 +123,8 @@ class DriveClient:
                 if r.status_code in ok:
                     return r
                 err = classify(r)
+                if isinstance(err, RateLimited):
+                    raise err        # общую паузу Google ставит программа, а не повторы на месте
                 if r.status_code == 401 and attempt == 0:
                     self.auth.invalidate()
                     if tries == 1:

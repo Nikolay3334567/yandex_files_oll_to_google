@@ -237,6 +237,164 @@ def test_sections_and_speed():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_failure_policy():
+    """Разбор неудач: ничего не крутится по кругу, исправное не откладывается, спасённое не теряется."""
+    from ya2gd import engine as eng
+    from ya2gd.fetch import DeadHosts, Overloaded, SpeedGuard, StorageDown
+    from ya2gd.http_util import ApiError, RateLimited
+    d = tempfile.mkdtemp()
+    try:
+        e = eng.Engine(d)
+        e._online = lambda: True
+        items = [{"path": f"disk:/A/{i}.jpg", "source": "disk", "name": f"{i}.jpg", "size": 10} for i in range(40)]
+        e._found(items, 1)
+
+        def row(i):
+            return dict(e.db.q1("SELECT * FROM files WHERE path=?", (f"disk:/A/{i}.jpg",)))
+
+        # 503 — не беда файла: повтор через минуту, потоков меньше, файл НЕ в «Отложенных»
+        before = len(e.gate.overloads)
+        e._failed(row(0), Overloaded("перегружен (503)"), "yandex")
+        r = row(0)
+        assert r["status"] == "pending" and r["attempts"] == 1 and r["next_try"] > time.time() + 30, r
+        assert len(e.gate.overloads) == before + 1
+        assert eng.Overloaded in eng.STOP_ERRORS          # и в циклах скачивания 503 не превращается в «нет файла»
+
+        # нет интернета: ни попытки, ни откладывания
+        e._online = lambda: False
+        e._failed(row(1), eng.LinkDown("Яндекс не выдал ссылку: сеть"), "yandex")
+        e._failed(row(2), StorageDown("s1.storage", "не отвечает", network=True), "yandex")
+        assert row(1)["status"] == "pending" and row(1)["attempts"] == 0 and e.offline_since
+        assert row(2)["status"] == "pending" and row(2)["defers"] == 0
+        e._online = lambda: True
+        e.offline_since = 0
+
+        # ссылки другим файлам выдаются — сбой ссылки одного файла: одна повторная попытка, потом «Отложенные»
+        e._last_link_ok = time.time()
+        e._failed(row(3), eng.LinkDown("500"), "yandex")
+        assert row(3)["status"] == "pending" and row(3)["attempts"] == 1
+        e._failed(row(3), eng.LinkDown("500"), "yandex")
+        assert row(3)["status"] == "deferred"
+        # ссылки не выдаются никому — пауза, а файл не виноват (волна сбоев из всех потоков — одна пауза)
+        e._last_link_ok = time.time() - 120
+        e._failed(row(4), eng.LinkDown("500"), "yandex")
+        e._failed(row(6), eng.LinkDown("500"), "yandex")
+        assert row(4)["status"] == "pending" and row(4)["attempts"] == 0 and e.ya_cooldown_until > time.time()
+        assert row(6)["attempts"] == 0 and e.api_hits == 1, e.api_hits
+        # …но поблажка — один раз за проход: файл в хвосте очереди не ходит по кругу
+        e.ya_cooldown_until = 0
+        e._failed(row(4), eng.LinkDown("500"), "yandex")
+        assert row(4)["status"] == "pending" and row(4)["attempts"] == 1
+        e._failed(row(4), eng.LinkDown("500"), "yandex")
+        assert row(4)["status"] == "deferred"
+        e.ya_cooldown_until = 0
+
+        # волна 429 из нескольких потоков — одна пауза и одно уполовинивание потоков
+        e.gate.configure(8, adaptive=True)
+        lim = e.gate.state()["limit"]
+        for _ in range(4):
+            e._yandex_limited(RateLimited("429"))
+        assert e.gate.state()["limit"] == max(1, lim // 2) and e.ya_hits == 1, (e.gate.state(), e.ya_hits)
+        e.ya_cooldown_until = 0
+
+        # сбой Google: скачанная копия в буфере не удаляется, после ручного повтора — снова «в буфере»
+        dat = os.path.join(d, "5.dat")
+        with open(dat, "wb") as f:
+            f.write(b"x" * 10)
+        e.db.update_file(row(5)["id"], status="uploading", local_path=dat)
+        for _ in range(eng.GOOGLE_MAX_ATTEMPTS):
+            e._failed(row(5), ApiError("Google: ошибка сервера 503", status=503, retryable=True, service="google"),
+                      "google")
+        r = row(5)
+        assert r["status"] == "error" and os.path.exists(dat) and "копия сохранена" in (r["note"] or ""), r
+        assert e.g_cooldown_until < time.time()        # сбои одного файла — не повод останавливать всё
+        e.retry_errors()
+        assert row(5)["status"] == "buffered"
+        # а сбои у разных файлов подряд — пауза загрузки, растущая, пока Google не оживёт
+        for i in (7, 8, 9):
+            e._google_trouble(row(i)["id"])
+        first = e.g_cooldown_until - time.time()
+        e.g_cooldown_until = 0
+        for i in (7, 8, 9):
+            e._google_trouble(row(i)["id"])
+        assert 50 < first <= 60 and e.g_cooldown_until - time.time() > 100, (first, e.g_trouble)
+        e._add_speed("google", 1)
+        assert e.g_trouble == 0
+        e.g_cooldown_until = 0
+
+        # «предохранитель»: возвращает файл в очередь не больше одного раза — мёртвые не ходят по кругу
+        eng.BREAKER_STREAK, eng.BREAKER_QUIET = 5, 0
+        e._last_ya_success = time.time() - 10
+        ids = [row(i)["id"] for i in range(10, 15)]
+        for i in range(10, 15):
+            e._defer(row(i), "Яндекс не начал отдавать файл", outage=True)
+        assert all(row(i)["status"] == "pending" for i in range(10, 15))
+        e.ya_cooldown_until = 0
+        for i in range(10, 15):
+            e._defer(row(i), "Яндекс не начал отдавать файл", outage=True)
+        assert all(row(i)["status"] == "deferred" for i in range(10, 15)), [row(i)["status"] for i in range(10, 15)]
+        assert set(ids) <= e._breaker_reverted
+        e.ya_cooldown_until = 0
+        print("OK 503, пропавший интернет, сбой ссылки, волна 429, сбой Google, предохранитель — без кругов и потерь")
+
+        # проверка интернета: после каждого сбоя — свежая (старое «интернет есть» отложило бы исправные
+        # файлы при обрыве связи), но потоки, упавшие разом, ждут одну общую проверку
+        del e._online
+        calls = []
+
+        class FakeSession:
+            def get(self, url, timeout=None):
+                calls.append(url)
+                time.sleep(0.3)
+                raise OSError("нет сети")
+        real_session = eng.session
+        eng.session = lambda: FakeSession()
+        try:
+            assert e._online() is False and e._online() is False
+            assert len(calls) == 4, calls                  # два сбоя подряд — две проверки (по 2 адреса)
+            calls.clear()
+            ts = [threading.Thread(target=e._online) for _ in range(6)]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join()
+            assert len(calls) <= 4, calls                  # шесть потоков разом — одна-две проверки
+        finally:
+            eng.session = real_session
+        print("OK «есть ли интернет» проверяется после каждого сбоя; потоки, упавшие разом, ждут одну проверку")
+
+        # сервер хранения «молчит» только после нескольких отказов на разных файлах
+        dh = DeadHosts()
+        assert not dh.strike("s1", connect_failed=False) and not dh.strike("s1", connect_failed=False)
+        assert dh.strike("s1", connect_failed=False) and dh.is_dead("s1")
+        assert not dh.strike("s2", connect_failed=True) and dh.strike("s2", connect_failed=True)
+        dh.forget("s1")
+        assert not dh.is_dead("s1")
+
+        # сторож скорости: «по капле» дольше окна — файл откладывается
+        g = SpeedGuard("x.mp4")
+        g.start -= 200
+        g.marks = [(g.start, 0)]
+        try:
+            g.add(1000)
+            raise AssertionError("сторож скорости не сработал")
+        except StorageDown as ex:
+            assert "по капле" in str(ex)
+        g2 = SpeedGuard("y.mp4")
+        g2.add(10 ** 6)                       # быстро — ничего
+        print("OK сервер считается молчащим после нескольких отказов; сторож скорости ловит «по капле»")
+
+        # перевод старых «ждущих» в «Отложенные» — один раз, а не при каждом запуске
+        e.db.update_file(row(20)["id"], status="pending", defers=1, next_try=time.time() + 600)
+        e.db.close()
+        e2 = eng.Engine(d)
+        assert dict(e2.db.q1("SELECT status FROM files WHERE path='disk:/A/20.jpg'"))["status"] == "pending"
+        e2.db.close()
+        print("OK обновление базы выполняется один раз: повторённые вручную файлы не уходят обратно")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_memqueue():
     q = MemQueue(100)
     stop = threading.Event()
@@ -284,6 +442,7 @@ if __name__ == "__main__":
     test_routing_sql_matches_python()
     test_disk_warnings()
     test_sections_and_speed()
+    test_failure_policy()
     test_memqueue()
     test_db_claims()
     print("\nМОДУЛЬНЫЕ ПРОВЕРКИ ПРОЙДЕНЫ")

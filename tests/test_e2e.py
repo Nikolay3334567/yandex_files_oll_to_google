@@ -435,11 +435,14 @@ def scenario_dead_many(e):
     http("POST", M + "/ctl/add_files", {"prefix": "disk:/Позже/g", "count": 40, "size": 1000})
     ya2 = http("GET", M + "/ctl/ya")[1]
     later = sorted(p for p in ya2 if p.startswith("disk:/Позже/"))
-    e.faults(dead=dead + later)
+    # «первый» сервер Яндекса не отвечает ни на один файл — это сбой Яндекса целиком, а не отдельных файлов
+    e.faults(hang={p: 30 for p in later})
     app.post("/api/scan/start", {"fresh": True})
     wait_for(lambda: app.get("/api/status")["scan"]["state"] == "done", 60, "scan 2")
     app.post("/api/transfer/start")
     wait_for(lambda: app.logfile_has("похоже, Яндекс сейчас не отдаёт файлы вообще"), 60, "breaker")
+    bs = app.get("/api/status")["stats"]["by_status"]
+    assert bs.get("deferred", {}).get("count", 0) < bad + len(later), bs
     print("OK когда не отдаётся вообще ничего — пауза, а не откладывание всех файлов подряд")
     # буфер, заданный посреди переноса, включается сразу — без «Пауза → Старт»
     buf = os.path.join(e.ddir, "Буфер D")

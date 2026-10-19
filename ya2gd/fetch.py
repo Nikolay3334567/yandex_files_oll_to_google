@@ -15,6 +15,8 @@ import threading
 import time
 from urllib.parse import urljoin, urlsplit
 
+import requests
+
 from .http_util import ApiError, NETWORK_ERRORS, RateLimited, session
 
 STORAGE_TIMEOUT = float(os.environ.get("YA2GD_STORAGE_TIMEOUT", "10"))
@@ -46,9 +48,34 @@ class Overloaded(ApiError):
 
 
 class DeadHosts:
+    """Серверы хранения, которые недавно молчали.
+
+    Сервер считается «молчащим» только после нескольких отказов на РАЗНЫХ файлах за 10 минут
+    (2 — если к нему не удалось даже подключиться, 3 — если подключились, но он не ответил):
+    одна заминка — беда одного файла, а не сервера. Файлы с «молчащего» сервера не пропускаются
+    без попытки, а пробуются с короткими таймаутами (PROBE_TIMEOUT): если сервер ожил — сразу видно."""
+
+    WINDOW = 600.0
+
     def __init__(self):
         self._until = {}
+        self._strikes = {}
         self._lock = threading.Lock()
+
+    def strike(self, host, connect_failed):
+        """Отказ сервера на очередном файле. True — сервер теперь считается молчащим."""
+        if not host:
+            return False
+        now = time.time()
+        with self._lock:
+            hits = [(t, c) for t, c in self._strikes.get(host, []) if t > now - self.WINDOW]
+            hits.append((now, connect_failed))
+            self._strikes[host] = hits
+            need = 2 if any(c for _, c in hits) else 3
+            if len(hits) >= need:
+                self._until[host] = now + DEAD_HOST_TTL
+                return True
+            return False
 
     def mark(self, host):
         if host:
@@ -58,6 +85,7 @@ class DeadHosts:
     def forget(self, host):
         with self._lock:
             self._until.pop(host, None)
+            self._strikes.pop(host, None)
 
     def is_dead(self, host):
         with self._lock:
@@ -77,9 +105,37 @@ class DeadHosts:
     def clear(self):
         with self._lock:
             self._until.clear()
+            self._strikes.clear()
 
 
 DEAD = DeadHosts()
+PROBE_TIMEOUT = (3.0, 8.0)          # для «молчащего» сервера: подключение 3 с, первый байт 8 с
+
+MIN_SPEED = float(os.environ.get("YA2GD_MIN_SPEED", str(8 * 1024)))       # байт/с
+SPEED_WINDOW = float(os.environ.get("YA2GD_SPEED_WINDOW", "120"))
+
+
+class SpeedGuard:
+    """Сторож скорости: сервер, который отдаёт файл «по капле» (меньше MIN_SPEED за SPEED_WINDOW),
+    держал бы поток часами — такой файл лучше отложить и взять доступные."""
+
+    def __init__(self, name):
+        self.name = name
+        self.start = time.time()
+        self.marks = [(self.start, 0)]
+        self.total = 0
+
+    def add(self, n):
+        self.total += n
+        now = time.time()
+        if now - self.marks[-1][0] >= 5:
+            self.marks.append((now, self.total))
+            while len(self.marks) > 2 and self.marks[1][0] <= now - SPEED_WINDOW:
+                self.marks.pop(0)
+        t0, b0 = self.marks[0]
+        if now - t0 >= SPEED_WINDOW and (self.total - b0) < MIN_SPEED * (now - t0):
+            speed = (self.total - b0) / max(1.0, now - t0)
+            raise StorageDown(None, f"Яндекс отдаёт «{self.name}» по капле ({speed / 1024:.1f} КБ/с) — файл отложен")
 
 
 def is_yandex_host(url):
@@ -105,22 +161,23 @@ def open_download(url, offset=0, sess=None, reject_pages=False):
             loc = urljoin(r.url, r.headers["Location"])
             r.close()
             host = urlsplit(loc).hostname or ""
-            if DEAD.is_dead(host):
-                raise StorageDown(host, f"сервер хранения Яндекса {host} недавно не отвечал")
-            # подключение — STORAGE_TIMEOUT; молчание дольше STREAM_READ_TIMEOUT посреди потока — обрыв
-            r = s.get(loc, headers=headers, stream=True, allow_redirects=False,
-                      timeout=(STORAGE_TIMEOUT, STREAM_READ_TIMEOUT))
+            # подключение — STORAGE_TIMEOUT; молчание дольше STREAM_READ_TIMEOUT посреди потока — обрыв.
+            # Недавно молчавший сервер пробуем с короткими таймаутами, а не пропускаем без попытки.
+            timeout = PROBE_TIMEOUT if DEAD.is_dead(host) else (STORAGE_TIMEOUT, STREAM_READ_TIMEOUT)
+            r = s.get(loc, headers=headers, stream=True, allow_redirects=False, timeout=timeout)
             hops += 1
-    except StorageDown:
-        raise
     except NETWORK_ERRORS as e:
         if host:
-            DEAD.mark(host)
+            connect = isinstance(e, (requests.ConnectTimeout, requests.ConnectionError)) and \
+                not isinstance(e, requests.ReadTimeout)
+            DEAD.strike(host, connect)
             raise StorageDown(host, f"сервер хранения Яндекса {host} не отвечает ({type(e).__name__})",
                               network=True)
         raise StorageDown(None, f"Яндекс не начал отдавать файл ({type(e).__name__})", network=True)
 
     code = r.status_code
+    if code in (200, 206) and host:
+        DEAD.forget(host)                    # сервер ожил
     if code in (200, 206):
         ctype = (r.headers.get("Content-Type") or "").lower()
         if reject_pages and any(t in ctype for t in _PAGE_TYPES):

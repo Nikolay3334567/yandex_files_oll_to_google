@@ -501,7 +501,7 @@ async function saveBuffer(){
   try{
     if($('buffer_dir').value) await post('/api/buffer/check',{path:$('buffer_dir').value}, true);
     await post('/api/settings', collect(['buffer_dir','buffer_gb','buffer_min_free_gb']), true);
-    $('bufRes').textContent = '✅ Сохранено' + (lastStatus && lastStatus.transfer.state==='running' ? '. Применится после «Пауза» → «Старт».' : '');
+    $('bufRes').textContent = '✅ Сохранено' + (lastStatus && lastStatus.transfer.state==='running' ? '. Новые файлы сразу пойдут через буфер.' : '');
     loadSettings();
   }catch(e){ $('bufRes').textContent='❌ '+e.message; }
 }
@@ -650,7 +650,7 @@ async function loadFiles(){
     return `<tr><td class="path">${esc(f.path)}</td><td>${fmtB(f.size)}</td>
     <td><span class="badge ${waiting?'b-warn':STB[f.status]}">${waiting?'Ждёт повтора':(ST[f.status]||f.status)}</span>${f.verified?'<div class="small" style="color:var(--ok)">✓ MD5 сверен</div>':''}
     ${f.attempts?`<div class="small muted">попыток: ${f.attempts}</div>`:''}${f.defers?`<div class="small muted">откладывался: ${f.defers}</div>`:''}
-    ${(waiting||f.status==='error')&&f.next_try<4e9?`<div class="small muted">повтор в ${hhmm(f.next_try)}</div>`:''}
+    ${(waiting||(f.status==='error'&&settings.auto_retry_hours>0))&&f.next_try<4e9?`<div class="small muted">повтор в ${hhmm(f.next_try)}</div>`:''}
     ${(f.status==='pending'||f.status==='uploading'||f.status==='buffered')&&f.bytes_done?`<div class="small muted">в Google ${fmtB(f.bytes_done)}</div>`:''}</td>
     <td class="small">${esc(f.note||'')} <span style="color:var(--err)">${esc(f.status==='done'?'':(f.last_error||''))}</span>
     ${f.gd_id?`<div><a target="_blank" href="https://drive.google.com/file/d/${esc(f.gd_id)}/view">открыть на Drive</a></div>`:''}

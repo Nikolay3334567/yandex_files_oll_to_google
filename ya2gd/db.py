@@ -192,7 +192,8 @@ class DB:
         with self._lock:
             row = self.conn.execute(
                 f"SELECT * FROM files WHERE {cond} "
-                f"ORDER BY (local_path IS NULL AND upload_uri IS NULL), {ORDERS.get(order, 'id')} LIMIT 1",
+                f"ORDER BY (local_path IS NULL AND upload_uri IS NULL), (attempts > 0), "
+                f"{ORDERS.get(order, 'id')} LIMIT 1",
                 [now] + args).fetchone()
             if row is None:
                 return None
