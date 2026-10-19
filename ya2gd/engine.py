@@ -404,7 +404,7 @@ class Engine:
         self._stats_lock = threading.Lock()
         self._stats_cache = None
         self._net_lock = threading.Lock()
-        self._online_at, self._online_ok = 0.0, True
+        self._net_checks, self._online_ok = 0, True    # сколько проверок связи сделано и последний ответ
         self._g_last_limit = 0.0
         self._last_link_ok = time.time()      # когда Яндекс последний раз выдал ссылку на скачивание
         self._g_fails = []
@@ -958,10 +958,11 @@ class Engine:
     def _online(self):
         """Есть ли интернет у компьютера (а не у Яндекса проблема). Проверяем заново после каждого сбоя:
         старое «интернет есть» в момент обрыва связи отложило бы исправные файлы. Если несколько потоков
-        упали разом, проверка одна — кто ждал её, берёт её ответ."""
-        asked = time.time()
+        упали разом, проверка одна — кто ждал её, берёт её ответ (по счётчику, а не по часам: в Windows
+        time.time() шагает по ~15 мс, и два вызова подряд видят одно и то же время)."""
+        seen = self._net_checks
         with self._net_lock:
-            if self._online_at >= asked:
+            if self._net_checks != seen:
                 return self._online_ok
             ok = False
             for url in (YANDEX_API, GOOGLE_API):
@@ -971,7 +972,8 @@ class Engine:
                     break
                 except Exception:  # noqa
                     continue
-            self._online_at, self._online_ok = time.time(), ok
+            self._online_ok = ok
+            self._net_checks += 1
             return ok
 
     def _went_offline(self):
