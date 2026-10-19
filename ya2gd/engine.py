@@ -24,6 +24,7 @@ import collections
 import csv
 import hashlib
 import io
+import json
 import os
 import re
 import shutil
@@ -378,7 +379,16 @@ class Engine:
         user = info.get("user") or {}
         res = {"ok": True, "user": user.get("display_name") or user.get("login"),
                "total": info.get("total_space"), "used": info.get("used_space"),
-               "photounlim_size": int(info.get("photounlim_size") or 0)}
+               "trash": info.get("trash_size"),
+               "photounlim_size": int(info.get("photounlim_size") or 0),
+               # Безлимит не занимает место только при тарифе Яндекс 360; без тарифа он входит в «занято».
+               # Эти поля API отдаёт не всем — если их нет, просто не показываем.
+               "is_paid": info.get("is_paid"),
+               "unlim_end": info.get("free_photounlim_end_date"),
+               "will_be_overdrawn": info.get("will_be_overdrawn")}
+        self.db.set("disk.info", json.dumps({k: res[k] for k in ("total", "used", "photounlim_size", "is_paid",
+                                                                  "unlim_end", "will_be_overdrawn")} |
+                                            {"at": time.time()}))
         try:
             files, _ = y.files_page(0, 1)
             res["files_api"] = "работает"
@@ -1714,9 +1724,31 @@ class Engine:
                 "min_free": s["buffer_min_free_gb"] * BUF_UNIT,
                 "files": self.db.count_status("buffered")}
 
+    def disk_warnings(self):
+        """Предупреждения о месте на Яндекс Диске: переполненный Диск Яндекс блокирует через 44 дня,
+        а заблокированный дольше 90 дней — очищает (справка Яндекса «Диск переполнен»)."""
+        try:
+            d = json.loads(self.db.get("disk.info") or "{}")
+        except ValueError:
+            return []
+        out = []
+        total, used = d.get("total") or 0, d.get("used") or 0
+        if total and used > total:
+            out.append(("err", f"Яндекс Диск переполнен: занято {used / GB:.1f} ГБ из {total / GB:.1f} ГБ. По правилам "
+                               f"Яндекса переполненный Диск через 44 дня блокируется (файлы недоступны даже для "
+                               f"скачивания), а заблокированный дольше 90 дней — очищается. Перенос нужно закончить "
+                               f"раньше; ничего не удаляйте и не перемещайте на Яндексе, пока он идёт"))
+        elif total and used > 0.95 * total:
+            out.append(("warn", f"Яндекс Диск почти заполнен: {used / GB:.1f} ГБ из {total / GB:.1f} ГБ. "
+                                f"Переносу это не мешает — программа только читает с Яндекса"))
+        if d.get("will_be_overdrawn") and d.get("unlim_end"):
+            out.append(("err", f"Бесплатный безлимит для фото заканчивается {str(d['unlim_end'])[:10]}: после этого "
+                               f"фото из безлимита начнут занимать место, и Диск окажется переполнен"))
+        return out
+
     def attention(self):
         """Что требует внимания человека — простыми словами."""
-        s, out = self.settings, []
+        s, out = self.settings, list(self.disk_warnings())
         if not s["yandex_token"]:
             out.append(("err", "Не указан токен Яндекса (блок 1)"))
         if not s["google_refresh_token"]:

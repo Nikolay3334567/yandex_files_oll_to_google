@@ -97,7 +97,8 @@ class H(BaseHTTPRequestHandler):
         p = u.path[len("/ya/v1/disk"):]
         if p in ("", "/"):
             return self.send_json(200, {"user": {"login": "tester", "display_name": "Тестер"},
-                                        "total_space": 10 ** 12, "used_space": 12345,
+                                        "total_space": 10 ** 12, "used_space": 12345, "trash_size": 0,
+                                        "is_paid": False, "will_be_overdrawn": False,
                                         "photounlim_size": sum(len(d) for k, d in S.ya.items()
                                                                if k.startswith("photounlim:"))})
         if S.faults["pu_hidden"] and (p.startswith("/photounlim/") or qs.get("path", "").startswith("photounlim:")):

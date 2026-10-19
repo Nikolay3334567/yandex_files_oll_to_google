@@ -405,10 +405,22 @@ async function saveYandex(){
     await post('/api/settings', collect(['yandex_token','yandex_client_id']));
     await loadSettings();
     const r = await api('/api/yandex/test',{method:'POST',headers:{'X-Ya2gd':'1'}});
-    $('yaRes').innerHTML = `✅ Токен рабочий. Пользователь: <b>${esc(r.user)}</b>\nМесто на Диске: занято ${fmtB(r.used)} из ${fmtB(r.total)}`+
-      `\nБезлимитные фото и видео (место не занимают, видны только в разделе «Фото»): <b>${r.photounlim_size?fmtB(r.photounlim_size):'нет'}</b>` +
-      (r.photounlim_size ? (r.photounlim_rest ? ' — отдаются официальным API' : ' — официальный API их не отдаёт, нужен блок 3 (куки)') :
-        '\nЗначит, все ваши фото лежат в обычных папках (обычно «Фотокамера») и входят в «занято» — программа возьмёт их через API.') +
+    const over = r.total && r.used > r.total;
+    let unlim;
+    if(!r.photounlim_size) unlim = 'нет. Значит, фото с телефона лежат в обычных папках (обычно «Фотокамера») — программа возьмёт их через API.';
+    else {
+      unlim = `<b>${fmtB(r.photounlim_size)}</b> — фото и видео с телефона, которые лежат только в разделе «Фото» (не в «Файлах»). `;
+      if(r.is_paid===true) unlim += 'Пока активен тариф Яндекс 360, они не занимают место. ';
+      else if(r.is_paid===false) unlim += 'Тарифа Яндекс 360 нет, поэтому они, скорее всего, входят в «занято». ';
+      else unlim += 'Место не занимают только при тарифе Яндекс 360, без тарифа входят в «занято». ';
+      unlim += r.photounlim_rest ? 'Отдаются официальным API.' : 'Официальный API их не отдаёт — нужен блок 3 (куки).';
+      if(r.unlim_end) unlim += `\nБесплатный безлимит заканчивается ${esc(String(r.unlim_end).slice(0,10))}` +
+        (r.will_be_overdrawn ? ' — после этого Диск окажется переполнен.' : '.');
+    }
+    $('yaRes').innerHTML = `✅ Токен рабочий. Пользователь: <b>${esc(r.user)}</b>` +
+      `\nМесто на Диске: занято <b>${fmtB(r.used)}</b> из ${fmtB(r.total)}` + (r.trash ? ` (в Корзине ${fmtB(r.trash)})` : '') +
+      (over ? '\n<span style="color:var(--err)">⚠ Диск переполнен. По правилам Яндекса через 44 дня он блокируется, а потом очищается — переносите как можно скорее.</span>' : '') +
+      `\nБезлимит: ${unlim}` +
       `\n«Файлы» через API: ${esc(r.files_api)}`;
   }catch(e){ $('yaRes').textContent='❌ '+e.message; }
 }

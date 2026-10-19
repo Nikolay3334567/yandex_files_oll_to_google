@@ -136,6 +136,27 @@ def test_routing_sql_matches_python():
     print("OK подсчёт прогресса по папкам совпадает с тем, куда реально кладутся файлы")
 
 
+def test_disk_warnings():
+    from ya2gd.engine import Engine
+    d = tempfile.mkdtemp()
+    try:
+        e = Engine(d)
+        gb = 2 ** 30
+        e.db.set("disk.info", json.dumps({"total": 10 * gb, "used": 12 * gb}))
+        w = e.disk_warnings()
+        assert w and w[0][0] == "err" and "44 дня" in w[0][1], w
+        e.db.set("disk.info", json.dumps({"total": 10 * gb, "used": 9.8 * gb, "will_be_overdrawn": True,
+                                          "unlim_end": "2026-11-01T00:00:00+00:00"}))
+        w = e.disk_warnings()
+        assert [lv for lv, _ in w] == ["warn", "err"] and "2026-11-01" in w[1][1], w
+        e.db.set("disk.info", json.dumps({"total": 10 * gb, "used": 1 * gb}))
+        assert e.disk_warnings() == []
+        e.db.close()
+        print("OK предупреждения: Диск переполнен (44/90 дней), почти полон, конец бесплатного безлимита")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_memqueue():
     q = MemQueue(100)
     stop = threading.Event()
@@ -181,6 +202,7 @@ if __name__ == "__main__":
     test_settings_migration()
     test_layout()
     test_routing_sql_matches_python()
+    test_disk_warnings()
     test_memqueue()
     test_db_claims()
     print("\nМОДУЛЬНЫЕ ПРОВЕРКИ ПРОЙДЕНЫ")
