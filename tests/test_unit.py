@@ -410,6 +410,99 @@ def test_memqueue():
     print("OK очередь в памяти ограничена по объёму")
 
 
+def test_probe_estimate():
+    """Пробный замер и разметка: типы файлов, серия «всего понемногу», расчёт времени и «предохранитель»."""
+    from ya2gd import probe as P
+    MB, GB = 2 ** 20, 2 ** 30
+    for name, kind in (("IMG_1.HEIC", "photo"), ("v.MOV", "video"), ("a.pdf", "doc"), ("b.7z", "archive"),
+                       ("y.bin", "other"), ("noext", "other")):
+        assert P.kind_of({"name": name}) == kind, name
+    assert P.kind_of({"name": "x", "media_type": "video"}) == "video"
+    assert P.kind_of({"name": "x.bin", "mime": "image/jpeg"}) == "photo"
+
+    def mk(n, name, size, **kw):
+        stem, ext = name.rsplit(".", 1)
+        return [dict({"id": len(name) * 10 ** 6 + i, "path": f"disk:/{stem}{i}.{ext}", "name": f"{stem}{i}.{ext}",
+                      "size": size, "section": 0, "status": "pending", "source": "disk", "probe": None}, **kw)
+                for i in range(n)]
+    rows = (mk(5000, "p.jpg", 3 * MB, section=1, source="photounlim") + mk(300, "v.mp4", 60 * MB) +
+            mk(20, "big.mov", 2 * GB) + mk(40, "d.pdf", 200_000) + mk(5, "z.zip", 50 * MB))
+    pick = P.choose_sample(rows, 24)
+    kinds = {P.kind_of(r) for r in pick}
+    buckets = {(P.kind_of(r), P.bucket_of(r["size"])) for r in pick}
+    assert len(pick) == 24 and kinds == {"photo", "video", "doc", "archive"} and len(buckets) == 5, buckets
+
+    meas = {"all": {"speed_bps": 10 * MB, "overhead_s": 0.5, "fail_s": 8.0, "ok": 20, "dead": 0},
+            "kinds": {}, "ya_bps": 80 * MB, "g_bps": 10 * MB, "g_rtt_s": 0.1}
+    iv = {"photounlim": 0.12, "disk": 0.15}
+
+    def est(rs, m=meas):
+        for r in rs:
+            r["kind"] = P.kind_of(r)
+        return P.estimate(rs, m, 8, 4, iv)
+    # упор в Google: 100 × 100 МБ при 10 МБ/с на загрузку
+    e1 = est(mk(100, "v.mp4", 100 * MB))
+    assert abs(e1["total_s"] - (10000 / 10 + 100 * 0.2 / 4)) < 1 and e1["bottleneck"] == "google", e1
+    # упор в суточный лимит Google: 1000 ГБ даже на быстром канале — больше суток
+    fast = dict(meas, ya_bps=1000 * MB, g_bps=1000 * MB, all=dict(meas["all"], speed_bps=200 * MB))
+    e2 = est(mk(1000, "big.mov", GB), fast)
+    assert 86400 < e2["total_s"] < 86400 + 600 and e2["bottleneck"] == "limit", e2
+    # упор в число файлов: 20 000 маленьких — ссылки не чаще одной в 0,12 с
+    e3 = est(mk(20000, "p.jpg", 100_000, section=1, source="photounlim"), fast)
+    assert abs(e3["total_s"] - 20000 * 0.12) < 1 and e3["bottleneck"] == "ya_files", e3
+    assert abs(e3["mark_s"] - 20000 * 0.12) < 1 and e3["unlabeled"] == 20000
+    # метки: «не отдаётся» — недоступен, но перенос его попробует; отложенный — недоступен и не пробуется;
+    # уже в буфере — только загрузка в Google
+    rs = mk(10, "a.jpg", MB, probe="dead") + mk(10, "b.jpg", MB, status="deferred") + \
+        mk(10, "c.jpg", MB, status="buffered") + mk(10, "d.jpg", MB, probe="ok")
+    e4 = est(rs)
+    assert e4["lost_files"] == 20 and e4["avail_files"] == 20 and e4["unlabeled"] == 10, e4
+    assert abs(e4["dead_s"] - 10 * 8.0 / 8) < 1e-6, e4["dead_s"]
+    # доля доступных для неразмеченных — по разметке этого типа (если меток хватает)
+    rs = mk(30, "e.jpg", MB, probe="ok") + mk(10, "f.jpg", MB, probe="dead") + mk(100, "g.jpg", MB)
+    e5 = est(rs)
+    assert e5["prior"]["photo"] == 0.75 and abs(e5["lost_files"] - (10 + 25)) <= 1, e5
+    # без замера скорости — без выдуманных цифр
+    assert P.estimate(rows[:3], None, 8, 4, iv) is None
+    print("OK замер: типы файлов, серия из всех групп «тип × размер»; расчёт упирается в Google, "
+          "в суточный лимит, в число файлов; метки разметки учитываются")
+
+    # «предохранитель» разметки: лежит весь Яндекс — метки снимаются, файл проверяется ещё раз (один раз)
+    class FakeDB:
+        def __init__(self):
+            self.cleared = []
+
+        def set_probe(self, fid, result, *a, **k):
+            if result is None:
+                self.cleared.append(fid)
+
+    class FakeEngine:
+        db = FakeDB()
+        logs = []
+
+        def log(self, msg, level="info"):
+            self.logs.append(msg)
+    fe = FakeEngine()
+    pr = P.Prober(fe, threading.Event())
+    pr.last_ok = time.time() - 1000
+    batch = [{"id": i} for i in range(P.OUTAGE_STREAK)]
+    back = []
+    for r in batch:
+        pr.results[r["id"]] = {"result": "dead"}
+        pr.counts["dead"] += 1
+        back += pr._outage(r, {"result": "dead", "outage": True})
+    assert len(back) == P.OUTAGE_STREAK and pr.pause_until > time.time() and not pr.results, back
+    assert sorted(fe.db.cleared) == list(range(P.OUTAGE_STREAK))
+    again = []
+    for r in batch:
+        again += pr._outage(r, {"result": "dead", "outage": True})
+    assert again == [], "файл возвращён на проверку второй раз"
+    pr2 = P.Prober(fe, threading.Event())
+    pr2.last_ok = time.time() - 1000
+    assert not any(pr2._outage({"id": i}, {"result": "dead", "outage": False}) for i in range(50))
+    print("OK «предохранитель» разметки: при сбое всего Яндекса метки не ставятся, повторная проверка — один раз")
+
+
 def test_db_claims():
     d = tempfile.mkdtemp()
     try:
@@ -429,8 +522,13 @@ def test_db_claims():
         assert r["size"] == 3000
         assert db.claim_download() is None
         assert db.reset_active() == 4 and db.count_status("pending") == 4
+        # файл, который разметка нашла недоступным, перенос берёт последним
+        pid = db.q1("SELECT id FROM files WHERE path='photounlim:/p.jpg'")[0]
+        db.set_probe(pid, "dead", note="молчит")
+        r = db.claim_download(order="photos_first")
+        assert r["path"] != "photounlim:/p.jpg", r
         db.close()                       # Windows не даёт удалить открытый файл базы
-        print("OK очередь: сначала «Фото», маленькие/по порядку, учёт места в буфере")
+        print("OK очередь: сначала «Фото», маленькие/по порядку, учёт места в буфере; недоступные по разметке — последними")
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -444,5 +542,6 @@ if __name__ == "__main__":
     test_sections_and_speed()
     test_failure_policy()
     test_memqueue()
+    test_probe_estimate()
     test_db_claims()
     print("\nМОДУЛЬНЫЕ ПРОВЕРКИ ПРОЙДЕНЫ")

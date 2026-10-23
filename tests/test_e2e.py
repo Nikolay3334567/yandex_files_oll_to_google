@@ -9,6 +9,10 @@
 3. Буфер на диске + REST API отвечает 410 на «Файлы» (как с октября 2026): список и файлы
    через веб-версию; программа убита посреди скачивания в буфер → докачка с места обрыва;
    файл больше буфера — напрямую; Яндекс отвечает 504; буфер пустеет в конце.
+4. Заметная часть файлов недоступна разными способами — доступное переносится быстро, недоступное
+   сразу в «Отложенных», потоки не падают; когда не отдаётся ничего — пауза, а не откладывание.
+5. Пробный замер на серии файлов разных типов, разметка всех файлов (остановка и продолжение),
+   «Отложить недоступные по разметке», расчёт времени; перенос после разметки.
 
 Запуск: python tests/test_e2e.py
 """
@@ -459,6 +463,88 @@ def scenario_dead_many(e):
           f"буфер, включённый на ходу, сразу заработал (через него прошло {b['passed_files']} файлов)")
 
 
+# ------------------------------------------------------------------------------------------- сценарий 5
+def task_done(app):
+    t = app.get("/api/status")["task"]
+    return t if t["state"] in ("done", "error", "stopped") else None
+
+
+def scenario_probe(e):
+    """Пробный замер, разметка и расчёт времени — без копирования файлов."""
+    app, M = e.app, e.M
+    app.start()
+    http("POST", M + "/ctl/add_files", {"prefix": "disk:/Видео/clip", "count": 6, "size": 6_000_000, "ext": "mov"})
+    http("POST", M + "/ctl/add_files", {"prefix": "disk:/Архивы/backup", "count": 3, "size": 70_000, "ext": "zip"})
+    ya = http("GET", M + "/ctl/ya")[1]
+    many = sorted(p for p in ya if p.startswith("disk:/Много/"))
+    dead, e504, hang = many[0:3], many[3:6], many[6:8]
+    bad = set(dead + e504 + hang)
+    e.faults(dead=dead, e504=e504, hang={p: 30 for p in hang})
+    app.post("/api/settings", dict(GOOD, yandex_cookies=COOKIES))
+    app.post("/api/scan/start", {"fresh": True})
+    wait_for(lambda: app.get("/api/status")["scan"]["state"] == "done", 60, "scan")
+
+    # пробный замер: серия файлов разных типов, скорость Яндекса во все потоки, скорость Google
+    code, r = app.post("/api/probe/sample")
+    assert code == 200, r
+    t = wait_for(lambda: task_done(app), 120, "sample")
+    assert t["state"] == "done", t
+    pr = app.get("/api/status")["probe"]
+    smp = pr["sample"]
+    kinds = {f["kind"] for f in smp["files"]}
+    assert len(smp["files"]) >= 8 and {"photo", "video", "doc", "archive"} <= kinds, (len(smp["files"]), kinds)
+    assert smp["ya_bps"] and smp["g_bps"] and smp["g_rtt_s"] is not None, smp
+    st = e.stats()
+    assert st["head_ranges"] >= len(smp["files"]) and st["upload_cancel"] >= 1, st
+    assert not [f for f in e.drive().values() if not f["folder"]], "замер оставил файлы на Drive"
+    est = pr["estimate"]
+    assert est and est["total_s"] > 0 and est["unlabeled"] > 0 and est["mark_s"] > 0, est
+    print(f"OK пробный замер: {len(smp['files'])} файлов ({', '.join(sorted(kinds))}); Яндекс "
+          f"{smp['ya_bps'] / 2**20:.0f} МБ/с, Google {smp['g_bps'] / 2**20:.0f} МБ/с; на Drive ничего не осталось; "
+          f"расчёт: перенос ≈ {est['total_s']:.0f} с, разметка ≈ {est['mark_s']:.0f} с")
+
+    # разметка заново — останавливается кнопкой; перенос в это время не запускается
+    e.faults(slow=0.05)
+    app.post("/api/probe/mark", {"fresh": True})
+    time.sleep(0.5)
+    code, r = app.post("/api/transfer/start")
+    assert code == 400 and "разметка" in r["error"], r
+    app.post("/api/task/stop")
+    t = wait_for(lambda: task_done(app), 60, "mark stop")
+    assert t["state"] == "stopped", t
+    none = app.get("/api/files?status=probe_none")["total"]
+    assert none > 0, "разметка не остановилась"
+    e.faults(slow=0)
+    app.post("/api/probe/mark", {"fresh": False})        # продолжение — только неразмеченные
+    t = wait_for(lambda: task_done(app), 120, "mark")
+    assert t["state"] == "done", t
+    dead_marked = app.get("/api/files?status=probe_dead&limit=500")["items"]
+    assert {f["path"] for f in dead_marked} == bad, sorted({f["path"] for f in dead_marked} ^ bad)
+    assert app.get("/api/files?status=probe_none")["total"] == 0
+    ok_n = app.get("/api/files?status=probe_ok")["total"]
+    assert ok_n == len(ya) - len(bad), (ok_n, len(ya), len(bad))
+    pr = app.get("/api/status")["probe"]
+    assert pr["deferrable"] == len(bad) and pr["estimate"]["lost_files"] == len(bad), pr["estimate"]
+    print(f"OK разметка: остановка и продолжение с неразмеченных; не отдаются ровно {len(bad)} недоступных файлов, "
+          f"отдаются {ok_n}; перенос во время разметки не запускается")
+
+    # отложить недоступные по разметке и перенести остальное — недоступные не тратят время переноса
+    code, r = app.post("/api/probe/defer")
+    assert r["n"] == len(bad), r
+    links = e.stats()["ya_download_links"]
+    app.post("/api/transfer/start")
+    wait_for(lambda: app.state() == "done", 120, "transfer after marking")
+    bs = app.get("/api/status")["stats"]["by_status"]
+    assert bs["deferred"]["count"] == len(bad) and bs["done"]["count"] == len(ya) - len(bad), bs
+    assert e.stats()["ya_download_links"] - links <= len(ya) - len(bad) + 5, "недоступные снова запрашивались"
+    e.faults(dead=[], e504=[], hang={})
+    app.post("/api/actions/retry_errors")
+    app.post("/api/transfer/start")
+    finish(app, 120, "after retry")
+    check(app, M)
+    print("OK «Отложить недоступные по разметке»: перенос их не трогает; после «Повторить» перенесено всё")
+
+
 def check(app, M):
     """Каждый файл Яндекса лежит на Drive ровно один раз, в правильной папке, с правильным MD5."""
     drive = http("GET", M + "/ctl/drive")[1]
@@ -501,7 +587,8 @@ if __name__ == "__main__":
     scenarios = [("direct", scenario_direct, {}), ("web", scenario_web, {}),
                  ("buffer", scenario_buffer, {"YA2GD_BUFFER_UNIT": str(2 ** 20)}),
                  ("dead_many", scenario_dead_many, {"YA2GD_FRONT_TIMEOUT": "2", "YA2GD_BREAKER_STREAK": "10",
-                                                    "YA2GD_BREAKER_QUIET": "3", "YA2GD_API_COOLDOWN": "2"})]
+                                                    "YA2GD_BREAKER_QUIET": "3", "YA2GD_API_COOLDOWN": "2"}),
+                 ("probe", scenario_probe, {"YA2GD_FRONT_TIMEOUT": "2", "YA2GD_SPEEDTEST_SECONDS": "2"})]
     for name, fn, extra in scenarios:
         if only and name not in only:
             continue

@@ -7,11 +7,15 @@
 - смещение сканирования Яндекс Диска.
 
 Статусы файла:
-  pending   — ждёт (если next_try в будущем — отложен: сервер Яндекса молчит);
+  pending   — ждёт (если next_try в будущем — ждёт повтора);
   active    — качается с Яндекса (или идёт напрямую Яндекс → Google);
   buffered  — скачан в буфер на диске, MD5 сверен, ждёт загрузки в Google;
   uploading — заливается в Google из буфера;
-  done      — на Google тот же размер и MD5; error — не вышло (повторится сам); skipped — пропущен вручную.
+  deferred  — Яндекс не отдал файл: повтор только вручную;
+  done      — на Google тот же размер и MD5; error — не вышло; skipped — пропущен вручную.
+
+Метка разметки (probe): ok — Яндекс отдаёт файл, slow — отдаёт «по капле», dead — не отдаёт,
+missing — файла нет на Яндексе, NULL — не проверялся (см. probe.py).
 """
 import sqlite3
 import threading
@@ -63,6 +67,11 @@ EXTRA_COLS = {
     "done_at": "REAL",
     "uploaded": "INTEGER NOT NULL DEFAULT 0",  # байт реально залито в Google (для суточного лимита)
     "section": "INTEGER NOT NULL DEFAULT 0",   # 1 — идёт в папку «Фото», 0 — в «Файлы» (engine.goes_to_photos)
+    "probe": "TEXT",                         # метка разметки: ok | slow | dead | missing
+    "probe_at": "REAL",
+    "probe_ms": "INTEGER",                   # задержка: ссылка + первый ответ Яндекса, мс
+    "probe_bps": "REAL",                     # скорость при пробе, байт/с
+    "probe_note": "TEXT",
 }
 
 FILE_COLS = ("path", "source", "name", "size", "md5", "sha256", "modified",
@@ -193,7 +202,7 @@ class DB:
             row = self.conn.execute(
                 f"SELECT * FROM files WHERE {cond} "
                 f"ORDER BY (local_path IS NULL AND upload_uri IS NULL), (attempts > 0), "
-                f"{ORDERS.get(order, 'id')} LIMIT 1",
+                f"(IFNULL(probe,'') IN ('dead','missing')), {ORDERS.get(order, 'id')} LIMIT 1",
                 [now] + args).fetchone()
             if row is None:
                 return None
@@ -247,6 +256,11 @@ class DB:
         """Пересчитать раздел всех файлов по правилу (один проход — при смене настройки)."""
         return self.x(f"UPDATE files SET section = CASE WHEN {photos_cond} THEN 1 ELSE 0 END")
 
+    def set_probe(self, fid, result, ms=None, bps=None, note=None):
+        """Метка разметки. Время изменения файла (updated) не трогаем — список «Файлы» не перемешивается."""
+        self.x("UPDATE files SET probe=?, probe_at=?, probe_ms=?, probe_bps=?, probe_note=? WHERE id=?",
+               (result, time.time() if result else None, ms, bps, note or None, fid))
+
     def update_file(self, fid, **kw):
         kw["updated"] = time.time()
         cols = ", ".join(f"{k}=?" for k in kw)
@@ -293,6 +307,10 @@ class DB:
             args.append(time.time())
         elif status == "preview":
             where.append("preview_id IS NOT NULL AND status!='done'")
+        elif status in ("probe_ok", "probe_dead", "probe_none"):
+            where.append("status NOT IN ('done','skipped') AND " + {
+                "probe_ok": "probe IN ('ok','slow')", "probe_dead": "probe IN ('dead','missing')",
+                "probe_none": "probe IS NULL"}[status])
         elif status:
             where.append("status=?")
             args.append(status)
@@ -302,7 +320,7 @@ class DB:
         w = ("WHERE " + " AND ".join(where)) if where else ""
         total = self.q1(f"SELECT COUNT(*) FROM files {w}", args)[0]
         rows = self.q(f"SELECT id,path,source,size,status,attempts,last_error,bytes_done,gd_id,note,updated,"
-                      f"verified,next_try,defers,preview_id,local_path "
+                      f"verified,next_try,defers,preview_id,local_path,probe,probe_ms,probe_bps,probe_note "
                       f"FROM files {w} ORDER BY updated DESC, id LIMIT ? OFFSET ?",
                       args + [limit, offset])
         return total, [dict(r) for r in rows]

@@ -54,7 +54,7 @@ class State:
                        "rest_500": False,   # API Яндекса отвечает 500 на запрос ссылки (Яндекс лежит целиком)
                        "web_session": "good-session"}
         self.calls = {"chunks": 0, "mpfs_url": 0, "small_uploads": 0, "previews": 0, "ya_download_links": 0,
-                      "ranges": 0, "max_parallel_dl": 0}
+                      "ranges": 0, "head_ranges": 0, "max_parallel_dl": 0, "upload_cancel": 0}
         self.parallel = 0
 
 
@@ -204,16 +204,21 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
-        start = 0
+        start, end = 0, len(data) - 1
         rng = self.headers.get("Range")
         if rng:
-            start = int(re.match(r"bytes=(\d+)-", rng).group(1))
-            S.calls["ranges"] += 1
+            m = re.match(r"bytes=(\d+)-(\d*)", rng)
+            start = int(m.group(1))
+            if m.group(2):
+                end = min(end, int(m.group(2)))
+                S.calls["head_ranges"] += 1      # «только начало файла» — замер и разметка
+            else:
+                S.calls["ranges"] += 1
             self.send_response(206)
-            self.send_header("Content-Range", f"bytes {start}-{len(data) - 1}/{len(data)}")
+            self.send_header("Content-Range", f"bytes {start}-{end}/{len(data)}")
         else:
             self.send_response(200)
-        part = data[start:]
+        part = data[start:end + 1]
         self.send_header("Content-Length", str(len(part)))
         self.end_headers()
         if part and random.random() < S.faults["ya_drop"]:
@@ -398,6 +403,10 @@ class H(BaseHTTPRequestHandler):
                 return self.send_json(200, {}, {"Location": f"http://127.0.0.1:{self.server.server_address[1]}"
                                                             f"/g/upload/session/{sid}"})
             m = re.match(r"/g/upload/session/(\w+)$", p)
+            if m and method == "DELETE":                 # отмена незавершённой загрузки (замер скорости)
+                S.sessions.pop(m.group(1), None)
+                S.calls["upload_cancel"] += 1
+                return self.send_json(499, {})
             if m and method == "PUT":
                 sess = S.sessions.get(m.group(1))
                 body = self.body()
@@ -450,7 +459,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/ctl/add_files" and method == "POST":
             b = json.loads(self.body())
             for i in range(b["count"]):
-                S.ya[f"{b['prefix']}{i:04d}.bin"] = os.urandom(b.get("size", 20000))
+                S.ya[f"{b['prefix']}{i:04d}.{b.get('ext', 'bin')}"] = os.urandom(b.get("size", 20000))
             return self.send_json(200, {"total": len(S.ya)})
         return self.send_json(404, {})
 

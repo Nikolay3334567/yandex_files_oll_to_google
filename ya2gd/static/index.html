@@ -38,7 +38,7 @@ input[type=checkbox]{width:auto}
 label{display:block;margin:8px 0 3px;color:var(--muted);font-size:12px}
 .chk{display:flex;gap:8px;align-items:flex-start;color:var(--fg);font-size:14px;margin:8px 0}
 .chk input{margin-top:3px}
-.badge{display:inline-block;padding:2px 9px;border-radius:99px;font-size:12px;background:var(--chip);font-weight:500}
+.badge{display:inline-block;white-space:nowrap;padding:2px 9px;border-radius:99px;font-size:12px;background:var(--chip);font-weight:500}
 .b-ok{background:color-mix(in srgb,var(--ok) 16%,transparent);color:var(--ok)}
 .b-warn{background:color-mix(in srgb,var(--warn) 16%,transparent);color:var(--warn)}
 .b-err{background:color-mix(in srgb,var(--err) 16%,transparent);color:var(--err)}
@@ -261,6 +261,29 @@ a{color:var(--acc)}
     <div class="muted small" style="margin-top:6px">«Старт» можно нажимать сразу: файлы попадают в очередь по мере получения списка.</div>
   </div>
 
+  <div class="card" id="probeCard">
+    <h2>6. Замер скорости и разметка <span id="prBadge" class="badge"></span></h2>
+    <div class="small muted">Необязательно. Показывает, сколько займёт перенос и сколько файлов Яндекс сейчас вообще отдаёт. Файлы при этом не копируются.
+      <b>Пробный замер</b> (1–2 минуты): серия из ~24 файлов разных типов и размеров. У каждого проверяется, отдаёт ли его Яндекс, с какой задержкой и скоростью.
+      Потом ~12 секунд идёт скачивание во все потоки и ~12 секунд загрузка тестовых данных в Google (на Drive ничего не появится).
+      <b>Разметка всех файлов</b>: у каждого ещё не перенесённого файла запрашиваются ссылка и первые 256 КБ, и файл помечается «отдаётся» или «не отдаётся».
+      Ссылки программа просит не чаще ~7 в секунду, чтобы не перегружать Яндекс, поэтому 23 000 файлов размечаются примерно за час. Остановленная разметка продолжается с неразмеченных файлов.
+      Во время замера и разметки перенос стоит.</div>
+    <div class="row" style="margin-top:10px">
+      <button class="primary" id="btnSample" onclick="post('/api/probe/sample')">⚡ Пробный замер (1–2 мин)</button>
+      <button id="btnMark" onclick="post('/api/probe/mark',{fresh:false})">🏷 Разметить все файлы</button>
+      <button id="btnRemark" onclick="if(confirm('Снять все метки и проверить все неперенесённые файлы заново?'))post('/api/probe/mark',{fresh:true})">Разметить заново</button>
+      <button id="btnTaskStop" onclick="post('/api/task/stop')">⏹ Остановить</button>
+    </div>
+    <div id="prRun" style="margin-top:10px"></div>
+    <div id="prEst" style="margin-top:10px"></div>
+    <div id="prLabels" style="margin-top:10px"></div>
+    <details id="prDetails" style="margin-top:10px"><summary><b>Подробности: по типам файлов и по каждому файлу замера</b></summary>
+      <div id="prKinds" style="overflow-x:auto;margin-top:8px"></div>
+      <div id="prFiles" style="overflow-x:auto;margin-top:12px"></div>
+    </details>
+  </div>
+
   <div class="grid">
     <div class="card">
       <h2>Настройки</h2>
@@ -330,6 +353,7 @@ a{color:var(--acc)}
         <option value="buffered">В буфере</option><option value="uploading">Заливаются</option>
         <option value="done">Готово</option><option value="deferred">Отложены (Яндекс не отдал)</option><option value="waiting">Ждут повтора</option><option value="preview">Есть только превью</option>
         <option value="error">Ошибки</option><option value="skipped">Пропущены</option>
+        <option value="probe_ok">Разметка: отдаются</option><option value="probe_dead">Разметка: не отдаются</option><option value="probe_none">Разметка: не проверены</option>
       </select>
       <input id="fQuery" placeholder="Поиск по пути" style="flex:1;min-width:160px" oninput="page=0;clearTimeout(window._qt);window._qt=setTimeout(loadFiles,300)">
       <button onclick="page=Math.max(0,page-1);loadFiles()">←</button>
@@ -352,12 +376,19 @@ a{color:var(--acc)}
 <script>
 const $ = id => document.getElementById(id);
 const ST = {pending:'В очереди', active:'Качается', buffered:'В буфере', uploading:'Заливается', done:'Готово', error:'Ошибка', skipped:'Пропущен', deferred:'Отложен'};
+const PROBE = {ok:'✓ отдаётся (разметка)', slow:'⚠ отдаёт по капле (разметка)', dead:'✗ не отдаётся (разметка)', missing:'✗ нет на Яндексе (разметка)'};
+const KIND = {photo:'Фото', video:'Видео', doc:'Документы', archive:'Архивы', other:'Прочее'};
+const RES = {ok:['отдаётся','b-ok'], slow:['по капле','b-warn'], dead:['не отдаётся','b-err'], missing:['нет на Яндексе','b-err']};
+const WHY = {ya_speed:'скорость скачивания с Яндекса вместе с вашим интернетом на приём',
+  ya_files:'число файлов: на каждый уходит запрос ссылки и ожидание ответа Яндекса (на недоступные — ещё и ожидание отказа)',
+  google:'загрузка в Google — скорость вашего интернета на отдачу',
+  limit:'суточный лимит Google ≈ 750 ГБ: каждые следующие 750 ГБ добавляют сутки'};
 const STB = {pending:'', active:'b-acc', buffered:'b-warn', uploading:'b-acc', done:'b-ok', error:'b-err', skipped:'b-warn', deferred:'b-warn'};
 let page = 0, logSeq = 0, settings = {}, lastStatus = null;
 
 function fmtB(b){ if(b==null) return '—'; const u=['Б','КБ','МБ','ГБ','ТБ']; let i=0; b=+b;
-  while(b>=1024&&i<u.length-1){b/=1024;i++} return (i?b.toFixed(b<10?2:1):b)+' '+u[i]; }
-function fmtT(s){ if(s==null||!isFinite(s)) return '—'; s=Math.round(s); const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
+  while(b>=1024&&i<u.length-1){b/=1024;i++} return (i?b.toFixed(b<10?2:1):Math.round(b))+' '+u[i]; }
+function fmtT(s){ if(s==null||!isFinite(s)) return '—'; s=Math.round(s); if(s<60) return s+' с'; const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
   return (d?d+' д ':'')+(d||h?h+' ч ':'')+m+' мин'; }
 function hhmm(ts){ return new Date(ts*1000).toLocaleTimeString('ru',{hour:'2-digit',minute:'2-digit'}); }
 function esc(s){ return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -365,6 +396,8 @@ function plural(n, one, few, many){ n=Math.abs(n)%100; const n1=n%10;
   return (n>10&&n<20)?many:(n1>1&&n1<5)?few:(n1===1)?one:many; }
 function nf(n){ return n.toLocaleString('ru')+' '+plural(n,'файл','файла','файлов'); }
 function pct(a,b){ return b ? Math.min(100, a/b*100) : 0; }
+function fmtS(bps){ return bps ? `${fmtB(bps)}/с (${(bps*8/1e6).toFixed(bps*8/1e6<10?1:0)} Мбит/с)` : '—'; }
+function ms(sec){ return sec==null ? '—' : (sec<1 ? Math.round(sec*1000)+' мс' : sec.toFixed(1)+' с'); }
 function kv(rows){ return rows.map(([k,v])=>`<span class="k">${k}</span><span>${v}</span>`).join(''); }
 
 async function api(url, opts={}){
@@ -547,6 +580,9 @@ async function refresh(){
   if(t.state==='done' && sum('deferred').count){ txt=`Проход завершён · отложено ${nf(sum('deferred').count)}`; cls='b-warn'; }
   if(t.state==='running' && t.offline_since){ txt='Нет интернета — жду'; cls='b-err'; }
   else if(t.state==='running' && !s.active.length && t.next_wakeup){ txt='Жду: Яндекс пока не отдаёт часть файлов, повтор в '+hhmm(t.next_wakeup); cls='b-warn'; }
+  const tk0 = s.task;
+  if(tk0.kind==='probe' && tk0.state==='running' && t.state!=='running'){
+    txt = tk0.name + (tk0.progress&&tk0.progress[1] ? ` · ${pct(tk0.progress[0],tk0.progress[1]).toFixed(0)}%` : '…'); cls='b-acc'; }
   $('stateBadge').textContent = txt; $('stateBadge').className = 'badge '+cls;
   $('btnStart').disabled = t.state==='running' || t.state==='pausing';
   $('btnPause').disabled = t.state!=='running';
@@ -618,12 +654,93 @@ async function refresh(){
     (sc.phase&&sc.phase!=='done'?` · этап: ${({main:'«Файлы»',photounlim:'раздел «Фото»'})[sc.phase]||sc.phase}`:'') +
     (sc.error?` · <span style="color:var(--err)">ошибка: ${esc(sc.error)}</span>`:'');
   $('btnScan').disabled = sc.running;
+  renderProbe(s);
   const tk = s.task;
   $('taskBox').innerHTML = tk.name ? kv([['Операция', `${esc(tk.name)} — ${tk.state==='running'?'выполняется…':(tk.state==='error'?'ошибка':'готово')}`],
     ['Итог', esc(tk.msg)]]) : '';
   $('footer').innerHTML = `Версия ${esc(s.version)} · настройки, прогресс и полный журнал: <code>${esc(s.data_dir)}</code>`;
   document.title = (t.state==='running' ? p.toFixed(1)+'% · ' : '') + 'Яндекс → Google';
   loadLog();
+}
+
+function renderProbe(s){
+  const pr = s.probe, tk = s.task, est = pr.estimate, m = pr.measure;
+  const probing = tk.kind==='probe' && tk.state==='running';
+  const busy = (tk.state==='running') || s.transfer.state==='running' || s.transfer.state==='pausing';
+  $('btnSample').disabled = busy; $('btnMark').disabled = busy; $('btnRemark').disabled = busy;
+  $('btnTaskStop').style.display = probing ? '' : 'none';
+  $('prBadge').textContent = probing ? 'идёт' : (m ? 'есть замер' : 'не выполнялся');
+  $('prBadge').className = 'badge ' + (probing ? 'b-acc' : (m ? 'b-ok' : ''));
+  if(probing){
+    const p = tk.progress && tk.progress[1] ? pct(tk.progress[0], tk.progress[1]) : 0;
+    $('prRun').innerHTML = `<div class="small"><b>${esc(tk.name)}</b> — ${esc(tk.msg||'начинаю…')}</div>` +
+      `<div class="bar" style="margin-top:4px"><div class="ya" style="width:${p.toFixed(1)}%"></div></div>`;
+  } else if(tk.kind==='probe' && tk.msg){
+    $('prRun').innerHTML = `<div class="small ${tk.state==='error'?'':'muted'}" style="${tk.state==='error'?'color:var(--err)':''}">` +
+      `${esc(tk.name)}: ${tk.state==='stopped'?'остановлено. ':''}${esc(tk.msg)}</div>`;
+  } else $('prRun').innerHTML = '';
+
+  if(!m){
+    $('prEst').innerHTML = '<div class="small muted">Расчёт появится после пробного замера или разметки.</div>';
+  } else {
+    const at = new Date(m.at*1000).toLocaleString('ru',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
+    const pf = est && est.total_s!=null;
+    let html = '<div class="grid3">';
+    html += `<div><h3>Перенос всего оставшегося</h3><div class="big-num">${pf ? '≈ '+fmtT(est.total_s) : '—'}</div>` +
+      `<div class="small muted">${pf ? `«Фото» ≈ ${fmtT(est.photos_s)} · «Файлы» ≈ ${fmtT(est.files_s)} (каждый раздел отдельно)` : 'не хватает данных о скорости — сделайте пробный замер'}</div></div>`;
+    html += `<div><h3>Что ограничивает</h3><div class="small">${est && est.bottleneck ? esc(WHY[est.bottleneck]) : '—'}</div>` +
+      (est && !est.google_measured ? '<div class="small" style="color:var(--warn)">Скорость Google не измерена — в расчёте только Яндекс</div>' : '') + '</div>';
+    html += `<div><h3>Проверка всех файлов (разметка)</h3><div class="big-num">${est ? (est.unlabeled ? '≈ '+fmtT(est.mark_s) : 'готово') : '—'}</div>` +
+      `<div class="small muted">${est && est.unlabeled ? `${nf(est.unlabeled)} ещё не размечено` : 'все неперенесённые файлы размечены'}</div></div>`;
+    html += '</div>';
+    const one = m.all && m.all.speed_bps;
+    const rows = [
+      ['Скачивание с Яндекса', m.ya_bps ? `${fmtS(m.ya_bps)} во все ${m.ya_streams} ${plural(m.ya_streams,'поток','потока','потоков')}` : esc(m.ya_note||'—')],
+      ['Один поток Яндекса', one ? fmtS(one) : '—'],
+      ['Задержка Яндекса на файл', ms(m.all && m.all.overhead_s) + ' (ссылка + первый ответ)'],
+      ['Недоступный файл стоит потоку', ms(m.all && m.all.fail_s)],
+      ['Загрузка в Google', m.g_bps ? `${fmtS(m.g_bps)} во все ${m.g_streams} ${plural(m.g_streams,'поток','потока','потоков')} · задержка ${ms(m.g_rtt_s)}` : esc(m.g_note||'—')],
+    ];
+    if(est){
+      rows.push(['Осталось перенести', `${nf(est.files)}, ${fmtB(est.bytes)}`]);
+      rows.push(['Из них ожидается доступно', `≈ ${nf(est.avail_files)}, ${fmtB(est.avail_bytes)}`]);
+      if(est.lost_files) rows.push(['Ожидается недоступно', `≈ ${nf(est.lost_files)}, ${fmtB(est.lost_bytes)}` + (est.dead_s>60 ? ` · попытки на них ≈ ${fmtT(est.dead_s)}` : '')]);
+    }
+    rows.push(['Замер', `${m.mode==='sample'?'пробный':'по разметке'}, ${at}`]);
+    $('prEst').innerHTML = html + '<div class="kv" style="margin-top:10px">' + kv(rows) + '</div>' +
+      '<div class="small muted" style="margin-top:6px">Это оценка по замеру: реальная скорость Яндекса в аварийном режиме может меняться. Во время переноса точнее строка «осталось ≈» вверху окна.</div>';
+  }
+
+  const L = pr.labels, any = ['photos','files'].some(k=>['ok','slow','dead','missing'].some(x=>L[k][x][0]));
+  if(any){
+    const line = (k, title) => { const x = L[k]; const n = a => a[0];
+      if(!['ok','slow','dead','missing','none'].some(y=>n(x[y]))) return '';
+      return `<div class="small"><b>${title}:</b> отдаются ${n(x.ok).toLocaleString('ru')} (${fmtB(x.ok[1])})` +
+        (n(x.slow)?`, по капле ${n(x.slow)}`:'') +
+        `, <span style="color:${n(x.dead)+n(x.missing)?'var(--err)':'inherit'}">не отдаются ${(n(x.dead)+n(x.missing)).toLocaleString('ru')} (${fmtB(x.dead[1]+x.missing[1])})</span>` +
+        (n(x.none)?`, не проверено ${n(x.none).toLocaleString('ru')}`:'') + '</div>'; };
+    $('prLabels').innerHTML = '<h3>Разметка неперенесённых файлов</h3>' + line('photos','«Фото»') + line('files','«Файлы»') +
+      `<div class="row" style="margin-top:8px">` +
+      (pr.deferrable ? `<button onclick="if(confirm('Отложить ${pr.deferrable} файлов, которые Яндекс при разметке не отдал? Перенос не будет тратить на них время; повторить их можно кнопкой «Повторить отложенные и ошибки».'))post('/api/probe/defer')">⏭ Отложить недоступные по разметке (${pr.deferrable})</button>` : '') +
+      `<a href="/api/report.csv?status=probe_dead"><button>⬇ Не отдаются по разметке (CSV)</button></a></div>` +
+      '<div class="small muted" style="margin-top:4px">Файлы, которые не отдаются, перенос и так берёт последними.</div>';
+  } else $('prLabels').innerHTML = '';
+
+  const kinds = m && m.kinds ? m.kinds : {};
+  const names = Object.keys(KIND).filter(k=>kinds[k] || pr.by_kind[k]);
+  $('prKinds').innerHTML = names.length ? `<table><thead><tr><th>Тип</th><th>Осталось</th><th>В замере: отдаётся</th><th>Задержка</th><th>Скорость потока</th><th>По разметке</th></tr></thead><tbody>` +
+    names.map(k=>{ const a = kinds[k]||{}, b = pr.by_kind[k]||{files:0,bytes:0,ok:0,dead:0};
+      return `<tr><td>${KIND[k]}</td><td>${nf(b.files)}, ${fmtB(b.bytes)}</td><td>${a.n ? `${(a.ok||0)+(a.slow||0)} из ${a.n}` : '—'}</td>` +
+        `<td>${ms(a.overhead_s)}</td><td>${a.speed_bps ? fmtB(a.speed_bps)+'/с' : '—'}</td><td>${b.ok||b.dead ? `отдаются ${b.ok}, нет ${b.dead}` : '—'}</td></tr>`; }).join('') +
+    '</tbody></table>' : '';
+  const sf = pr.sample && pr.sample.files || [];
+  $('prFiles').innerHTML = sf.length ? `<div class="small muted">Пробный замер, ${new Date(pr.sample.at*1000).toLocaleString('ru')}:</div>` +
+    `<table><thead><tr><th>Файл</th><th>Тип</th><th>Размер</th><th>Результат</th><th>Задержка</th><th>Скорость</th><th>Примечание</th></tr></thead><tbody>` +
+    sf.map(f=>{ const [rt, rc] = RES[f.result]||[f.result,''];
+      return `<tr><td class="path">${esc(f.path)}</td><td>${KIND[f.kind]||f.kind}</td><td>${fmtB(f.size)}</td><td><span class="badge ${rc}">${rt}</span></td>` +
+        `<td>${f.link_s!=null ? ms(f.link_s+f.ttfb_s) : (f.fail_s!=null ? 'отказ за '+ms(f.fail_s) : '—')}</td>` +
+        `<td>${f.read_s && f.bytes >= 65536 ? fmtB(f.bytes/f.read_s)+'/с' : '—'}${f.bytes ? `<div class="small muted">прочитано ${fmtB(f.bytes)}</div>` : ''}</td><td class="small">${esc(f.note||'')}</td></tr>`; }).join('') +
+    '</tbody></table>' : '';
 }
 
 async function loadLog(){
@@ -649,6 +766,7 @@ async function loadFiles(){
     const waiting = f.status==='pending' && f.next_try>now;
     return `<tr><td class="path">${esc(f.path)}</td><td>${fmtB(f.size)}</td>
     <td><span class="badge ${waiting?'b-warn':STB[f.status]}">${waiting?'Ждёт повтора':(ST[f.status]||f.status)}</span>${f.verified?'<div class="small" style="color:var(--ok)">✓ MD5 сверен</div>':''}
+    ${f.probe?`<div class="small" title="${esc(f.probe_note||'')}" style="color:${f.probe==='ok'?'var(--ok)':(f.probe==='slow'?'var(--warn)':'var(--err)')}">${PROBE[f.probe]}${f.probe_ms?' · '+f.probe_ms+' мс':''}</div>`:''}
     ${f.attempts?`<div class="small muted">попыток: ${f.attempts}</div>`:''}${f.defers?`<div class="small muted">откладывался: ${f.defers}</div>`:''}
     ${(waiting||(f.status==='error'&&settings.auto_retry_hours>0))&&f.next_try<4e9?`<div class="small muted">повтор в ${hhmm(f.next_try)}</div>`:''}
     ${(f.status==='pending'||f.status==='uploading'||f.status==='buffered')&&f.bytes_done?`<div class="small muted">в Google ${fmtB(f.bytes_done)}</div>`:''}</td>

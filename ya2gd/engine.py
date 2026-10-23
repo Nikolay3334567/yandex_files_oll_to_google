@@ -39,9 +39,10 @@ from .fetch import DEAD, Overloaded, SpeedGuard, StorageDown, open_download
 from .gdrive import API as GOOGLE_API, APP_PROP, DriveClient, GoogleAuth
 from .http_util import (ApiError, AuthError, FatalPause, LocalDiskError, NETWORK_ERRORS, RateLimited,
                         WebAuthError, backoff, session)
+from .probe import Prober, estimate, kind_of, merge_measures
 from .throttle import AdaptiveGate
-from .yandex import API as YANDEX_API, YandexClient
-from .yaweb import DISK_ROOT, UNLIM_ROOT, YandexWeb
+from .yandex import API as YANDEX_API, REQUEST_INTERVAL, YandexClient
+from .yaweb import DISK_ROOT, MIN_INTERVAL as WEB_INTERVAL, UNLIM_ROOT, YandexWeb
 
 GB = 2 ** 30
 MB = 2 ** 20
@@ -372,6 +373,7 @@ class Engine:
         self.buffer_lock = threading.Lock()
         self.stop_transfer = threading.Event()
         self.stop_scan = threading.Event()
+        self.task_stop = threading.Event()      # «Остановить» для замера и разметки
         self.downloaders, self.uploaders = [], []
         self.supervisor = None
         self.transfer_state = "idle"     # idle | running | pausing | paused | done | attention
@@ -387,7 +389,7 @@ class Engine:
         self.offline_since = 0
         self._net_checked = 0
         self.scan_thread = None
-        self.task = {"name": "", "state": "idle", "msg": ""}
+        self.task = {"name": "", "state": "idle", "msg": "", "kind": ""}
         self.task_thread = None
         self.google_state = os.urandom(16).hex()
         self._auth = None
@@ -411,6 +413,8 @@ class Engine:
         self.g_trouble = 0                    # сколько раз подряд Google сбоил целиком (растёт пауза)
         self._breaker_reverted = set()        # файлы, которые «предохранитель» уже раз возвращал в очередь
         self._link_excused = set()            # файлы, которым сбой выдачи ссылок уже раз не засчитан
+        self._probe_lock = threading.Lock()
+        self._probe_cache = None
 
     # ================================================================== клиенты
     def yandex(self, stop=None):
@@ -713,6 +717,8 @@ class Engine:
                 raise AuthError("Сначала укажите токен Яндекса")
             if not s["google_refresh_token"]:
                 raise AuthError("Сначала авторизуйтесь в Google")
+            if self._probing():
+                raise ApiError("Сейчас идёт замер или разметка — дождитесь конца или нажмите «Остановить»")
             self.buffer = None
             self.apply_buffer()
             self._recover_buffer()
@@ -1266,8 +1272,9 @@ class Engine:
         Каждый файл возвращается не больше одного раза за запуск — иначе мёртвые файлы ходили бы по кругу."""
         fid = row["id"]
         keep = self._keep_partial(row)
+        # метка разметки устарела: последнее слово — за переносом
         self.db.update_file(fid, status="deferred", next_try=0, defers=(row.get("defers") or 0) + 1,
-                            last_error=reason[:1000], note="Яндекс не отдал файл — отложен",
+                            last_error=reason[:1000], note="Яндекс не отдал файл — отложен", probe=None,
                             **({} if keep else {"local_path": None}))
         self.log(f"Отложен «{row['path']}»: {reason}", "warn")
         with self.lock:
@@ -1339,9 +1346,9 @@ class Engine:
         self.db.update_file(fid, status="pending", attempts=attempts, last_error=str(e)[:1000],
                             next_try=now + 60)
 
-    def _link(self, row):
+    def _link(self, row, stop=None):
         """(ссылка, HTTP-сессия, это_веб_версия). «Файлы» — через API, при отказе API — через сайт."""
-        stop = self.stop_transfer
+        stop = stop or self.stop_transfer
         cookies = bool(self.settings["yandex_cookies"]) and not self.web_problem
         web = (row["source"] == "photounlim" and self.photounlim_mode() == "web") or \
             (row["source"] == "disk" and cookies and (self.rest_broken or not self.settings["yandex_token"]))
@@ -1379,12 +1386,17 @@ class Engine:
             raise _link_error(e)
 
     def _open_source(self, row, offset):
-        """Поток файла с Яндекса с байта offset. Через сайт Яндекс вместо отказа иногда присылает страницу —
-        такой ответ отбраковываем, но не для файлов, которые сами по себе .html/.json."""
+        """Поток файла с Яндекса с байта offset."""
         url, sess, web = self._link(row)
+        return self._open_link(row, url, sess, web, offset)
+
+    @staticmethod
+    def _open_link(row, url, sess, web, offset, length=None):
+        """Через сайт Яндекс вместо отказа иногда присылает страницу — такой ответ отбраковываем,
+        но не для файлов, которые сами по себе .html/.json."""
         name, mime = (row.get("name") or "").lower(), (row.get("mime") or "").lower()
         textual = "html" in mime or "json" in mime or name.endswith((".html", ".htm", ".xhtml", ".json"))
-        return open_download(url, offset, sess=sess, reject_pages=web and not textual)
+        return open_download(url, offset, sess=sess, reject_pages=web and not textual, length=length)
 
     def _download_one(self, row, info):
         s = self.settings
@@ -1975,21 +1987,28 @@ class Engine:
     def busy(self):
         return self.transferring() or bool(self.task_thread and self.task_thread.is_alive())
 
-    def run_task(self, name, fn, allow_during_transfer=False):
+    def run_task(self, name, fn, allow_during_transfer=False, kind=""):
         with self.lock:
             if (self.transferring() and not allow_during_transfer) or \
                     (self.task_thread and self.task_thread.is_alive()):
                 raise ApiError("Сначала остановите перенос и дождитесь окончания текущей операции")
-            self.task = {"name": name, "state": "running", "msg": ""}
+            self.task_stop.clear()
+            self.task = {"name": name, "state": "running", "msg": "", "kind": kind, "progress": None,
+                         "started": time.time()}
 
             def wrap():
                 try:
                     msg = fn()
-                    self.task.update(state="done", msg=msg or "готово")
+                    self.task.update(state="stopped" if self.task_stop.is_set() else "done", msg=msg or "готово")
                     self.log(f"{name}: {msg or 'готово'}")
                 except Exception as e:  # noqa
                     self.task.update(state="error", msg=str(e))
                     self.log(f"{name}: ошибка — {e}", "error")
+                    if not isinstance(e, ApiError):
+                        self.log(traceback.format_exc(), "debug")
+                finally:
+                    with self._probe_lock:
+                        self._probe_cache = None
             self.task_thread = threading.Thread(target=wrap, daemon=True)
             self.task_thread.start()
 
@@ -2033,15 +2052,117 @@ class Engine:
             return f"превью сохранено для {ok} из {len(rows)} недоступных фото/видео"
         self.run_task("Спасение превью", fn, allow_during_transfer=True)
 
+    # ================================================================== замер скорости и разметка
+    def _probing(self):
+        return bool(self.task_thread and self.task_thread.is_alive() and self.task.get("kind") == "probe")
+
+    def _probe_ready(self):
+        s = self.settings
+        if not s["yandex_token"] and not s["yandex_cookies"]:
+            raise AuthError("Сначала укажите токен Яндекса")
+        if not self.db.q1("SELECT 1 FROM files LIMIT 1"):
+            raise ApiError("Сначала получите список файлов (блок 5)")
+
+    def speed_sample(self):
+        """Пробный замер на небольшой серии файлов разных типов (1–2 минуты), см. probe.py."""
+        self._probe_ready()
+        self.run_task("Пробный замер скорости", lambda: Prober(self, self.task_stop).sample(), kind="probe")
+
+    def mark_all(self, fresh=False):
+        """Разметка всех ещё не перенесённых файлов: отдаёт ли их Яндекс (ссылка + первые 256 КБ)."""
+        self._probe_ready()
+        self.run_task("Разметка файлов", lambda: Prober(self, self.task_stop).mark_all(fresh), kind="probe")
+
+    def stop_task(self):
+        self.task_stop.set()
+
+    def defer_marked(self):
+        """Кнопка «Отложить недоступные по разметке»: перенос не тратит на них время, повтор — вручную."""
+        n = self.db.x("UPDATE files SET status='deferred', next_try=0, defers=defers+1, updated=?, "
+                      "note='Разметка: Яндекс не отдал файл — отложен', last_error=probe_note "
+                      "WHERE status IN ('pending','error') AND probe='dead'", (time.time(),))
+        m = self.db.x("UPDATE files SET status='error', next_try=?, updated=?, note='нет на Яндексе', "
+                      "last_error=probe_note WHERE status IN ('pending','error','deferred') AND probe='missing'",
+                      (FOREVER, time.time()))
+        with self._probe_lock:
+            self._probe_cache = None
+        self.log(f"По разметке отложено {n} файлов, которые Яндекс не отдаёт" +
+                 (f"; {m} файлов нет на Яндексе — в «Ошибках»" if m else "") +
+                 ". Повторить — кнопкой «Повторить отложенные и ошибки».")
+        return n + m
+
+    def save_measure(self, mode, meas):
+        self.db.set(f"probe.{mode}", json.dumps(meas, ensure_ascii=False))
+        with self._probe_lock:
+            self._probe_cache = None
+
+    def _load_measure(self, mode):
+        try:
+            return json.loads(self.db.get(f"probe.{mode}") or "null")
+        except ValueError:
+            return None
+
+    def _link_intervals(self):
+        """Как часто Яндекс выдаёт ссылки на файлы каждого раздела (ограничитель частоты программы)."""
+        s = self.settings
+        web_disk = bool(s["yandex_cookies"]) and (bool(self.rest_broken) or not s["yandex_token"])
+        return {"photounlim": WEB_INTERVAL if self.photounlim_mode() == "web" else REQUEST_INTERVAL,
+                "disk": WEB_INTERVAL if web_disk else REQUEST_INTERVAL}
+
+    def probe_info(self, force=False):
+        """Замер, разметка и расчёт времени — для окна. Пересчёт не чаще раза в 3 с (во время разметки)
+        или в 15 с: нужно пройти по всем незавершённым файлам."""
+        now = time.time()
+        with self._probe_lock:
+            c = self._probe_cache
+            if c and not force and now - c[0] < (3 if self._probing() else 15):
+                return c[1]
+        rows = [dict(r) for r in self.db.q("SELECT name, mime, media_type, size, section, status, probe, source "
+                                           "FROM files WHERE status NOT IN ('done','skipped')")]
+        labels = {sec: {k: [0, 0] for k in ("ok", "slow", "dead", "missing", "none")} for sec in ("photos", "files")}
+        by_kind = {}
+        for r in rows:
+            r["kind"] = kind_of(r)
+            lb = labels["photos" if r["section"] else "files"][r["probe"] or "none"]
+            lb[0] += 1
+            lb[1] += r["size"]
+            k = by_kind.setdefault(r["kind"], {"files": 0, "bytes": 0, "ok": 0, "dead": 0})
+            k["files"] += 1
+            k["bytes"] += r["size"]
+            if r["probe"] in ("ok", "slow"):
+                k["ok"] += 1
+            elif r["probe"] in ("dead", "missing"):
+                k["dead"] += 1
+        sample, full = self._load_measure("sample"), self._load_measure("full")
+        meas = merge_measures(sample, full)
+        s = self.settings
+        est = estimate(rows, meas, s["yandex_streams_max"], s["google_streams"], self._link_intervals())
+        deferrable = self.db.q1("SELECT COUNT(*) FROM files WHERE status IN ('pending','error') "
+                                "AND probe IN ('dead','missing')")[0]
+        info = {"labels": labels, "by_kind": by_kind, "sample": sample, "full": full and dict(full, files=[]),
+                "estimate": est, "deferrable": deferrable,
+                "measure": meas and {k: meas.get(k) for k in ("mode", "at", "ya_bps", "ya_note", "g_bps", "g_rtt_s",
+                                                               "g_note", "ya_streams", "g_streams", "kinds", "all")}}
+        with self._probe_lock:
+            self._probe_cache = (time.time(), info)
+        return info
+
     def report_csv(self, only=None):
         out = io.StringIO()
         wr = csv.writer(out, delimiter=";")
         wr.writerow(["Путь на Яндексе", "Раздел", "Размер, байт", "MD5 Яндекса", "Статус", "Проверено (MD5 совпал)",
-                     "Папка на Google Drive", "Ссылка", "Превью вместо оригинала", "Ошибка/примечание"])
+                     "Папка на Google Drive", "Ссылка", "Превью вместо оригинала", "Ошибка/примечание",
+                     "Разметка", "Задержка Яндекса, мс", "Примечание разметки"])
         st_names = {"pending": "в очереди", "active": "в работе", "buffered": "в буфере", "uploading": "в работе",
                     "done": "готово", "error": "ошибка", "skipped": "пропущен", "deferred": "отложен"}
-        rows = self.db.q("SELECT * FROM files WHERE status=? ORDER BY source, path", (only,)) if only else \
-            self.db.q("SELECT * FROM files ORDER BY source, path")
+        probe_names = {"ok": "отдаётся", "slow": "отдаёт по капле", "dead": "не отдаётся", "missing": "нет на Яндексе"}
+        if only == "probe_dead":
+            rows = self.db.q("SELECT * FROM files WHERE probe IN ('dead','missing') "
+                             "AND status NOT IN ('done','skipped') ORDER BY source, path")
+        elif only:
+            rows = self.db.q("SELECT * FROM files WHERE status=? ORDER BY source, path", (only,))
+        else:
+            rows = self.db.q("SELECT * FROM files ORDER BY source, path")
         for r in rows:
             r = dict(r)
             wr.writerow([r["path"], "Фото" if r["source"] == "photounlim" else "Файлы", r["size"], r["md5"] or "",
@@ -2050,7 +2171,8 @@ class Engine:
                          drive_dir_for(r, self.settings),
                          f"https://drive.google.com/file/d/{r['gd_id']}/view" if r["gd_id"] else "",
                          f"https://drive.google.com/file/d/{r['preview_id']}/view" if r["preview_id"] else "",
-                         r["last_error"] or r["note"] or ""])
+                         r["last_error"] or r["note"] or "",
+                         probe_names.get(r["probe"], ""), r["probe_ms"] or "", r["probe_note"] or ""])
         return "\ufeff" + out.getvalue()      # BOM — чтобы Excel открыл кириллицу
 
     def retry_errors(self):
@@ -2228,6 +2350,7 @@ class Engine:
             "speed": {"yandex": sy, "google": sg},
             "eta": (left / sp) if sp > 0 else None,
             "task": self.task,
+            "probe": self.probe_info(),
             "buffer": self.buffer_info(),
             "quota": self.g_quota,
             "attention": self.attention(st),

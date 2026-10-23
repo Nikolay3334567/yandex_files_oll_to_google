@@ -276,6 +276,15 @@ class DriveClient:
         end = start + len(data) - 1
         return self._put(uri, data, f"bytes {start}-{end}/{size}")
 
+    def cancel_upload(self, uri):
+        """Бросить незавершённую сессию загрузки (замер скорости): файл на Drive так и не появляется,
+        а брошенная сессия Google сама истекает через неделю — отмена лишь освобождает её раньше."""
+        try:
+            session().delete(uri, headers={"Authorization": f"Bearer {self.auth.access_token()}"},
+                             timeout=(CONNECT_TIMEOUT, 30)).close()
+        except Exception:  # noqa
+            pass
+
     def _put(self, uri, data, content_range):
         headers = {"Authorization": f"Bearer {self.auth.access_token()}",
                    "Content-Length": str(len(data)), "Content-Range": content_range}

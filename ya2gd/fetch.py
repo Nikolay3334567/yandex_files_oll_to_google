@@ -143,14 +143,17 @@ def is_yandex_host(url):
     return host == "localhost" or host.startswith("127.") or any(host.endswith(d) for d in YANDEX_HOSTS)
 
 
-def open_download(url, offset=0, sess=None, reject_pages=False):
+def open_download(url, offset=0, sess=None, reject_pages=False, length=None):
     """Открывает поток файла с байта offset. Возвращает (response, фактическое_смещение).
 
     reject_pages: оригинал фото/видео никогда не приходит HTML/JSON — это отказ Яндекса.
+    length: нужны только первые length байт (замер, разметка) — сервер не начинает отдавать весь файл.
     """
     s = sess or session()
     headers = {"Accept-Encoding": "identity"}
-    if offset:
+    if length:
+        headers["Range"] = f"bytes={offset}-{offset + length - 1}"
+    elif offset:
         headers["Range"] = f"bytes={offset}-"
     host = ""
     try:

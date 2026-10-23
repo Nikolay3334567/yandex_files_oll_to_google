@@ -175,6 +175,17 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/actions/reset_db":
                 e.reset_db()
                 return self._send(200, {"ok": True})
+            if p == "/api/probe/sample":
+                e.speed_sample()
+                return self._send(200, {"ok": True})
+            if p == "/api/probe/mark":
+                e.mark_all(bool(b.get("fresh")))
+                return self._send(200, {"ok": True})
+            if p == "/api/probe/defer":
+                return self._send(200, {"ok": True, "n": e.defer_marked()})
+            if p == "/api/task/stop":
+                e.stop_task()
+                return self._send(200, {"ok": True})
             if p == "/api/files/action":
                 e.file_action(int(b["id"]), b["action"])
                 return self._send(200, {"ok": True})
@@ -218,6 +229,7 @@ def _check_buffer(path):
 def _quit(engine):
     engine.log("Выход по команде из окна программы: останавливаю перенос…")
     engine.stop_scanning()
+    engine.stop_task()
     engine.pause_transfer("выход из программы", by_user=False)
     t0 = time.time()
     while engine.transferring() and time.time() - t0 < 60:
