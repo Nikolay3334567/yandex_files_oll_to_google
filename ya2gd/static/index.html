@@ -4,24 +4,28 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Яндекс → Google</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Cpath d='M8 16h13m-5-6 6 6-6 6' stroke='white' stroke-width='3' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
 :root{
   --bg:#f3f4f6; --card:#fff; --fg:#1b1f24; --muted:#6b7280; --line:#e5e7eb;
-  --acc:#2563eb; --ok:#16a34a; --warn:#d97706; --err:#dc2626; --chip:#eef2ff;
-  --bar:#e5e7eb; --input:#fff;
+  --acc:#2563eb; --ok:#16a34a; --warn:#b45309; --err:#dc2626; --chip:#eef2ff;
+  --bar:#e5e7eb; --input:#fff; --ya:#d97706; --g:#2563eb;
 }
 @media (prefers-color-scheme: dark){
   :root{--bg:#0f1115; --card:#181b21; --fg:#e6e8eb; --muted:#9aa3ae; --line:#2a2f37;
-    --acc:#5b8cff; --ok:#34c759; --warn:#f0a43a; --err:#ff5a52; --chip:#22283a; --bar:#2a2f37; --input:#11141a;}
+    --acc:#5b8cff; --ok:#34c759; --warn:#f0a43a; --err:#ff5a52; --chip:#22283a; --bar:#2a2f37; --input:#11141a;
+    --ya:#f0a43a; --g:#5b8cff;}
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 header{position:sticky;top:0;z-index:5;background:var(--card);border-bottom:1px solid var(--line);padding:12px 20px}
-.wrap{max-width:1180px;margin:0 auto;padding:16px}
+.wrap{max-width:1200px;margin:0 auto;padding:16px}
 h1{font-size:18px;margin:0}
 h2{font-size:15px;margin:0 0 10px}
-.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+h3{font-size:13px;margin:0 0 6px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.03em}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
+.grid3{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
 .muted{color:var(--muted)} .small{font-size:12px}
 button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--fg);padding:7px 12px;border-radius:7px;cursor:pointer}
@@ -29,37 +33,52 @@ button:hover{border-color:var(--acc)}
 button.primary{background:var(--acc);border-color:var(--acc);color:#fff}
 button.danger{color:var(--err)}
 button:disabled{opacity:.45;cursor:default}
-input,select{font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:7px;background:var(--input);color:var(--fg);width:100%}
+input,select,textarea{font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:7px;background:var(--input);color:var(--fg);width:100%}
 input[type=checkbox]{width:auto}
 label{display:block;margin:8px 0 3px;color:var(--muted);font-size:12px}
-.chk{display:flex;gap:8px;align-items:center;color:var(--fg);font-size:14px;margin:8px 0}
-.badge{display:inline-block;padding:2px 9px;border-radius:99px;font-size:12px;background:var(--chip)}
-.b-ok{background:color-mix(in srgb,var(--ok) 18%,transparent);color:var(--ok)}
-.b-warn{background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}
-.b-err{background:color-mix(in srgb,var(--err) 18%,transparent);color:var(--err)}
-.b-acc{background:color-mix(in srgb,var(--acc) 18%,transparent);color:var(--acc)}
-.bar{height:10px;background:var(--bar);border-radius:99px;overflow:hidden}
+.chk{display:flex;gap:8px;align-items:flex-start;color:var(--fg);font-size:14px;margin:8px 0}
+.chk input{margin-top:3px}
+.badge{display:inline-block;white-space:nowrap;padding:2px 9px;border-radius:99px;font-size:12px;background:var(--chip);font-weight:500}
+.b-ok{background:color-mix(in srgb,var(--ok) 16%,transparent);color:var(--ok)}
+.b-warn{background:color-mix(in srgb,var(--warn) 16%,transparent);color:var(--warn)}
+.b-err{background:color-mix(in srgb,var(--err) 16%,transparent);color:var(--err)}
+.b-acc{background:color-mix(in srgb,var(--acc) 16%,transparent);color:var(--acc)}
+.bar{height:10px;background:var(--bar);border-radius:99px;overflow:hidden;display:flex}
 .bar>div{height:100%;background:var(--acc);transition:width .4s}
+.bar>div.ok{background:var(--ok)} .bar>div.ya{background:var(--ya)} .bar>div.part{background:color-mix(in srgb,var(--acc) 45%,transparent)}
 .bar.big{height:16px}
-.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}
 .tile{border:1px solid var(--line);border-radius:9px;padding:10px;cursor:pointer}
 .tile:hover{border-color:var(--acc)}
 .tile .v{font-size:20px;font-weight:600}
+.tile .hint{font-size:11px;color:var(--muted)}
+.tile .v.warn{color:var(--warn)} .tile .v.err{color:var(--err)}
 table{width:100%;border-collapse:collapse;font-size:13px}
 th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
 td.path{word-break:break-all}
-.log{height:260px;overflow:auto;font:12px/1.5 ui-monospace,Consolas,monospace;background:var(--input);border:1px solid var(--line);border-radius:8px;padding:8px}
+.log{height:280px;overflow:auto;font:12px/1.5 ui-monospace,Consolas,monospace;background:var(--input);border:1px solid var(--line);border-radius:8px;padding:8px}
 .log .warn{color:var(--warn)} .log .error{color:var(--err)}
 .res{white-space:pre-wrap;font-size:12px;margin-top:8px}
 .banner{display:none;background:var(--err);color:#fff;padding:8px 20px;text-align:center}
 .active-item{margin:8px 0}
-.kv{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;font-size:13px}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:13px}
+.kv .k{color:var(--muted)}
+.att{border-left:4px solid var(--warn);padding:8px 12px;margin:6px 0;background:color-mix(in srgb,var(--warn) 8%,transparent);border-radius:6px}
+.att.err{border-color:var(--err);background:color-mix(in srgb,var(--err) 8%,transparent)}
+.lane{display:inline-block;min-width:76px;font-size:11px;font-weight:600}
+.lane.yandex{color:var(--ya)} .lane.google{color:var(--g)}
+.drive{border:1px solid var(--line);border-radius:8px;padding:6px 10px;cursor:pointer;font-size:13px}
+.drive:hover{border-color:var(--acc)} .drive.sel{border-color:var(--acc);background:var(--chip)}
+.big-num{font-size:22px;font-weight:600}
+.step-done summary::after{content:" ✓";color:var(--ok)}
+details>summary{cursor:pointer}
+code{font-size:12px}
 a{color:var(--acc)}
-@media (max-width:600px){.wrap{padding:16px}.grid{grid-template-columns:1fr}}
+@media (max-width:600px){.wrap{padding:16px}.grid,.grid3{grid-template-columns:1fr} header{padding:10px 16px}}
 </style>
 </head>
 <body>
-<div class="banner" id="banner">Программа не отвечает. Возможно, окно с программой закрыто — запустите её снова, перенос продолжится с того же места.</div>
+<div class="banner" id="banner">Программа не отвечает. Возможно, её окно закрыто или компьютер перезагружался — запустите её снова, перенос продолжится с того же места.</div>
 <header>
   <div class="row" style="justify-content:space-between">
     <div class="row"><h1>Яндекс Диск → Google Drive</h1><span id="stateBadge" class="badge">…</span></div>
@@ -69,18 +88,57 @@ a{color:var(--acc)}
     </div>
   </div>
   <div style="margin-top:10px">
-    <div class="bar big"><div id="mainBar" style="width:0"></div></div>
+    <div class="bar big" title="зелёное — перенесено и сверено; голубое — частично передано"><div id="mainBar" class="ok" style="width:0"></div><div id="partBar" class="part" style="width:0"></div></div>
     <div class="row small muted" style="margin-top:5px;justify-content:space-between">
       <span id="mainText">—</span><span id="speedText"></span>
     </div>
-    <div class="small" id="reason" style="color:var(--warn)"></div>
   </div>
 </header>
 
 <div class="wrap">
+  <div id="terms"></div>
+  <div id="attention"></div>
+
+  <div class="grid3">
+    <div class="card">
+      <h3>Фото и видео → Google</h3>
+      <div class="small muted" id="secPhotosDst"></div>
+      <div class="big-num" id="secPhotosPct">—</div>
+      <div class="bar"><div id="secPhotosBar" class="ok" style="width:0"></div></div>
+      <div class="small muted" id="secPhotosText" style="margin-top:4px"></div>
+    </div>
+    <div class="card">
+      <h3>Остальные файлы → Google</h3>
+      <div class="small muted" id="secFilesDst"></div>
+      <div class="big-num" id="secFilesPct">—</div>
+      <div class="bar"><div id="secFilesBar" class="ok" style="width:0"></div></div>
+      <div class="small muted" id="secFilesText" style="margin-top:4px"></div>
+    </div>
+    <div class="card">
+      <h3>Проверка</h3>
+      <div class="big-num" id="verNum">—</div>
+      <div class="small muted" id="verText"></div>
+    </div>
+  </div>
+
+  <div class="grid3">
+    <div class="card">
+      <h3><span class="lane yandex">Яндекс ↓</span></h3>
+      <div class="kv" id="yaBox"></div>
+    </div>
+    <div class="card">
+      <h3>Буфер</h3>
+      <div class="kv" id="bufBox"></div>
+      <div class="bar" style="margin-top:8px"><div id="bufBar" class="ya" style="width:0"></div></div>
+    </div>
+    <div class="card">
+      <h3><span class="lane google">Google ↑</span></h3>
+      <div class="kv" id="gBox"></div>
+    </div>
+  </div>
+
   <div class="card">
     <div class="tiles" id="tiles"></div>
-    <div class="small muted" id="verText" style="margin-top:8px"></div>
   </div>
 
   <div class="card">
@@ -90,10 +148,10 @@ a{color:var(--acc)}
 
   <div class="grid">
     <div class="card">
-      <h2>1. Яндекс Диск <span id="yaBadge" class="badge"></span></h2>
+      <details id="stepYa" open><summary><h2 style="display:inline">1. Яндекс Диск <span id="yaBadge" class="badge"></span></h2></summary>
       <label>OAuth-токен Яндекса</label>
       <input id="yandex_token" placeholder="y0_AgAAAA…" autocomplete="off">
-      <details class="small" style="margin-top:8px"><summary>Как получить токен</summary>
+      <details class="small" style="margin-top:8px"><summary>Как получить токен (3 минуты)</summary>
         <ol>
           <li>Откройте <a href="https://oauth.yandex.ru/client/new" target="_blank">oauth.yandex.ru/client/new</a>, создайте приложение
             (платформа «Веб-сервисы», Redirect URI: <code>https://oauth.yandex.ru/verification_code</code>),
@@ -108,23 +166,25 @@ a{color:var(--acc)}
         <button class="primary" onclick="saveYandex()">Сохранить и проверить</button>
       </div>
       <div class="res" id="yaRes"></div>
+      </details>
     </div>
 
     <div class="card">
-      <h2>2. Google Drive <span id="gBadge" class="badge"></span></h2>
+      <details id="stepG" open><summary><h2 style="display:inline">2. Google Drive <span id="gBadge" class="badge"></span></h2></summary>
       <label>Client ID (тип «Desktop app»)</label>
       <input id="google_client_id" placeholder="…apps.googleusercontent.com">
       <label>Client secret</label>
       <input id="google_client_secret" placeholder="GOCSPX-…" autocomplete="off">
-      <details class="small" style="margin-top:8px"><summary>Как получить</summary>
+      <details class="small" style="margin-top:8px"><summary>Как получить (5 минут)</summary>
         <ol>
           <li><a href="https://console.cloud.google.com/projectcreate" target="_blank">Создайте проект</a> в Google Cloud,
             включите <a href="https://console.cloud.google.com/apis/library/drive.googleapis.com" target="_blank">Google Drive API</a>.</li>
           <li>«OAuth consent screen» / «Google Auth Platform»: тип External, добавьте себя в тестовые пользователи,
-            потом нажмите <b>Publish app (In production)</b> — иначе токен будет умирать через 7 дней.</li>
+            потом нажмите <b>Publish app (In production)</b> — иначе вход будет слетать через 7 дней.</li>
           <li>«Credentials → Create credentials → OAuth client ID → <b>Desktop app</b>». Скопируйте ID и secret сюда.</li>
           <li>Нажмите «Войти в Google». Предупреждение «приложение не проверено» — это ваше приложение: «Дополнительно → Перейти».</li>
         </ol>
+        <p>Программа видит на Drive только то, что создала сама (доступ <code>drive.file</code>).</p>
       </details>
       <div class="row" style="margin-top:10px">
         <button class="primary" onclick="googleLogin()">Войти в Google</button>
@@ -132,85 +192,156 @@ a{color:var(--acc)}
         <button class="danger" onclick="post('/api/google/logout').then(loadSettings)">Выйти</button>
       </div>
       <div class="res" id="gRes"></div>
+      </details>
     </div>
   </div>
 
-  <div class="card" id="puCard">
-    <h2>3. Раздел «Фото» — автозагрузка с телефона <span id="puBadge" class="badge"></span></h2>
-    <div class="small" id="puInfo" style="margin-bottom:8px"></div>
+  <div class="card">
+    <details id="stepPu" open><summary><h2 style="display:inline">3. Раздел «Фото» (автозагрузка с телефона) <span id="puBadge" class="badge"></span></h2></summary>
+    <div class="small" id="puInfo" style="margin:8px 0"></div>
     <details class="small"><summary><b>Зачем куки и как их взять (2 минуты)</b></summary>
       <p>Фото из безлимитной автозагрузки видны только в разделе «Фото», а официальный API Яндекса их не отдаёт.
-      Веб-версия Диска получает их плоским списком (с размером и MD5) и выдаёт ссылку на оригинал каждого файла —
-      программа делает то же самое от вашего имени. Для этого нужны куки вашего входа в Яндекс.
-      Файлы идут напрямую Яндекс → Google, на компьютер ничего не сохраняется.</p>
+      Сайт Диска получает их плоским списком (с размером и MD5) и выдаёт ссылку на оригинал каждого файла —
+      программа делает то же самое, строго по одному файлу. Куки нужны и как запасной путь для «Файлов»,
+      если API Яндекса отвечает «410 Gone» (так бывает с октября 2026).</p>
       <ol>
-        <li>Поставьте расширение <b>Cookie-Editor</b> (<a href="https://chromewebstore.google.com/detail/cookie-editor/hlkenndednhfkekhgcdicdfddnkalmdm" target="_blank">Chrome / Яндекс.Браузер / Edge</a>,
+        <li>Поставьте расширение <b>Cookie-Editor</b> (<a href="https://chromewebstore.google.com/detail/cookie-editor/hlkenndednhfkekhgcdicdfddnkalmdm" target="_blank">Chrome / Яндекс Браузер / Edge</a>,
           <a href="https://addons.mozilla.org/ru/firefox/addon/cookie-editor/" target="_blank">Firefox</a>).</li>
         <li>Откройте <a href="https://disk.yandex.ru/client/photo" target="_blank">disk.yandex.ru/client/photo</a> — там должны быть видны ваши фото.</li>
-        <li>Нажмите значок 🍪 расширения → <b>Export → Export as JSON</b> (скопируется в буфер).</li>
+        <li>Нажмите значок 🍪 расширения → <b>Export → Export as JSON</b> (скопируется в буфер обмена).</li>
         <li>Вставьте в поле ниже и нажмите «Сохранить и проверить».</li>
       </ol>
-      <p>Можно вставить и строку заголовка <code>Cookie: …</code> из инструментов разработчика (F12 → Сеть).
-      Куки живут от нескольких дней до нескольких недель. Когда устареют, программа поставит на паузу только раздел «Фото»
-      и напишет об этом. Остальные файлы продолжат переноситься. Обновите куки и нажмите «Старт».
+      <p>Куки живут от нескольких дней до нескольких недель. Когда устареют, программа поставит на паузу только то,
+      что идёт через сайт, и напишет об этом наверху. Остальное продолжит переноситься. Обновите куки и нажмите «Старт».
       Куки — это доступ к вашему аккаунту: они хранятся только на этом компьютере, никому их не передавайте.</p>
     </details>
     <label>Куки disk.yandex.ru</label>
-    <textarea id="yandex_cookies" rows="3" style="width:100%;font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:7px;background:var(--input);color:var(--fg)" placeholder='[{"name":"Session_id","value":"…"}, …]  или  Session_id=…; sessionid2=…; yandexuid=…'></textarea>
+    <textarea id="yandex_cookies" rows="3" placeholder='[{"name":"Session_id","value":"…"}, …]  или  Session_id=…; sessionid2=…; yandexuid=…'></textarea>
     <div class="row" style="margin-top:8px">
       <button class="primary" onclick="saveCookies()">Сохранить и проверить</button>
     </div>
     <div class="res" id="puRes"></div>
+    </details>
   </div>
 
   <div class="card">
-    <h2>4. Список файлов <span id="scanBadge" class="badge"></span></h2>
-    <div class="small muted">Программа получает у Яндекса готовый плоский список всех файлов: «Файлы» — официальным API, раздел «Фото» — как веб-версия.
-      Ничего не скачивается, только список с размерами и MD5.</div>
-    <div class="muted small" id="scanText"></div>
+    <details id="stepBuf" open><summary><h2 style="display:inline">4. Буфер на диске компьютера <span id="bufBadge" class="badge"></span></h2></summary>
+    <div class="small muted" style="margin:8px 0">Необязательно. <b>Без буфера</b> маленькие файлы ждут в памяти, а большие видео идут
+      напрямую Яндекс → Google кусками по 32 МБ. <b>С буфером</b> (рекомендуется, если на быстром диске есть 20–30 ГБ):
+      файлы скачиваются с Яндекса, не дожидаясь Google, MD5 сверяется до загрузки, оборванное видео докачивается с места обрыва,
+      а пока Google на паузе из-за суточного лимита, скачивание с Яндекса продолжается. Файлы из буфера удаляются сразу после
+      проверки на Google. Файл больше буфера идёт напрямую.</div>
+    <div class="row" id="drives"></div>
+    <div class="row" style="margin-top:8px">
+      <input id="buffer_dir" placeholder="Папка буфера, например D:\YandexBuffer (пусто — без буфера)" style="flex:1;min-width:240px">
+      <button onclick="pickFolder()">Обзор…</button>
+      <button onclick="checkBuffer()">Проверить</button>
+    </div>
+    <div class="grid" style="grid-template-columns:1fr 1fr;gap:0 12px">
+      <div><label>Размер буфера, ГБ</label><input id="buffer_gb" type="number" min="1"></div>
+      <div><label>Всегда оставлять свободным на диске, ГБ</label><input id="buffer_min_free_gb" type="number" min="0"></div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button class="primary" onclick="saveBuffer()">Сохранить буфер</button>
+      <button onclick="$('buffer_dir').value='';saveBuffer()">Без буфера</button>
+    </div>
+    <div class="res" id="bufRes"></div>
+    </details>
+  </div>
+
+  <div class="card">
+    <h2>5. Список файлов <span id="scanBadge" class="badge"></span></h2>
+    <div class="small muted">Программа получает у Яндекса готовый плоский список всех файлов (имена, размеры, MD5) — ничего не скачивая.
+      Затем для каждого файла отдельно запрашивает ссылку и переносит его.</div>
+    <div class="small" id="scanText" style="margin-top:6px"></div>
     <div class="row" style="margin-top:10px">
       <button class="primary" onclick="post('/api/scan/start',{fresh:false})" id="btnScan">Получить список / продолжить</button>
       <button onclick="if(confirm('Получить список заново? Уже перенесённые файлы останутся отмеченными.'))post('/api/scan/start',{fresh:true})">Обновить список с начала</button>
       <button onclick="post('/api/scan/stop')">Остановить</button>
     </div>
-    <div class="muted small" style="margin-top:6px">Перенос можно запускать сразу: файлы попадают в очередь по мере получения списка.</div>
+    <div class="muted small" style="margin-top:6px">«Старт» можно нажимать сразу: файлы попадают в очередь по мере получения списка.</div>
+  </div>
+
+  <div class="card" id="probeCard">
+    <h2>6. Замер скорости и разметка <span id="prBadge" class="badge"></span></h2>
+    <div class="small muted">Необязательно. Показывает, сколько займёт перенос и сколько файлов Яндекс сейчас вообще отдаёт. Файлы при этом не копируются.
+      <b>Пробный замер</b> (1–2 минуты): серия из ~24 файлов разных типов и размеров. У каждого проверяется, отдаёт ли его Яндекс, с какой задержкой и скоростью.
+      Потом ~12 секунд идёт скачивание во все потоки и ~12 секунд загрузка тестовых данных в Google (на Drive ничего не появится).
+      <b>Разметка всех файлов</b>: у каждого ещё не перенесённого файла запрашиваются ссылка и первые 256 КБ, и файл помечается «отдаётся» или «не отдаётся».
+      Ссылки программа просит не чаще ~7 в секунду, чтобы не перегружать Яндекс, поэтому 23 000 файлов размечаются примерно за час. Остановленная разметка продолжается с неразмеченных файлов.
+      Во время замера и разметки перенос стоит.</div>
+    <div class="row" style="margin-top:10px">
+      <button class="primary" id="btnSample" onclick="post('/api/probe/sample')">⚡ Пробный замер (1–2 мин)</button>
+      <button id="btnMark" onclick="post('/api/probe/mark',{fresh:false})">🏷 Разметить все файлы</button>
+      <button id="btnRemark" onclick="if(confirm('Снять все метки и проверить все неперенесённые файлы заново?'))post('/api/probe/mark',{fresh:true})">Разметить заново</button>
+      <button id="btnTaskStop" onclick="post('/api/task/stop')">⏹ Остановить</button>
+    </div>
+    <div id="prRun" style="margin-top:10px"></div>
+    <div id="prEst" style="margin-top:10px"></div>
+    <div id="prLabels" style="margin-top:10px"></div>
+    <details id="prDetails" style="margin-top:10px"><summary><b>Подробности: по типам файлов и по каждому файлу замера</b></summary>
+      <div id="prKinds" style="overflow-x:auto;margin-top:8px"></div>
+      <div id="prFiles" style="overflow-x:auto;margin-top:12px"></div>
+    </details>
   </div>
 
   <div class="grid">
     <div class="card">
       <h2>Настройки</h2>
       <div class="grid" style="grid-template-columns:1fr 1fr;gap:0 12px">
-        <div><label>Папка на Google Drive</label><input id="drive_root"></div>
-        <div><label>Папка для безлимитных фото</label><input id="photounlim_folder"></div>
-        <div><label>Раскладка безлимитных фото</label>
-          <select id="photounlim_split"><option value="month">Год / месяц</option><option value="year">По годам</option><option value="none">Всё в одну папку</option></select></div>
-        <div><label>Способ сканирования</label>
-          <select id="scan_mode"><option value="flat">Плоский список всех файлов (быстро)</option><option value="tree">Обход папок</option></select></div>
-        <div><label>Потоков одновременно</label><input id="workers" type="number" min="1" max="16"></div>
+        <div><label>Папка для фото и видео на Drive</label><input id="photos_root"></div>
+        <div><label>Раскладка внутри «Фото»</label>
+          <select id="photos_split"><option value="month">Год / месяц</option><option value="year">По годам</option><option value="none">Всё в одну папку</option></select></div>
+        <div><label>Папка для остальных файлов на Drive</label><input id="files_root"></div>
+        <div><label>Папка для превью (если оригинал недоступен)</label><input id="previews_root"></div>
+        <div style="grid-column:1/-1"><label>Фото и видео, которые лежат в обычных папках Диска (не в безлимите)</label>
+          <select id="photos_from_disk">
+            <option value="camera">Из папки «Фотокамера» (автозагрузка с телефона) — в «Фото» по датам; из других папок — в своих папках</option>
+            <option value="all">Все фото и видео с Диска — в «Фото» по датам; в «Файлах» — только остальное</option>
+            <option value="none">Оставить в своих папках, как на Яндексе (в «Фото» — только безлимит)</option>
+          </select>
+          <div class="small muted" style="margin-top:4px">Каждый файл попадает на Drive ровно один раз — дублей между «Фото» и «Файлами» нет.
+            Выберите до начала переноса: уже перенесённые файлы не перекладываются.</div></div>
+        <div><label>Что переносить первым</label>
+          <select id="order"><option value="photos_first">Сначала «Фото»</option><option value="files_first">Сначала «Файлы»</option>
+            <option value="small_first">Сначала маленькие (больше файлов быстрее)</option><option value="as_listed">По порядку списка</option></select></div>
+        <div><label>Как получать список «Файлов»</label>
+          <select id="scan_mode"><option value="flat">Плоский список через API (быстро)</option><option value="tree">Обход папок через API</option><option value="web">Через сайт Диска (куки)</option></select></div>
+        <div><label>Потоков к Яндексу (потолок)</label><input id="yandex_streams_max" type="number" min="1" max="16"></div>
+        <div><label>Потоков к Google</label><input id="google_streams" type="number" min="1" max="8"></div>
         <div><label>Размер куска, МБ</label><input id="chunk_mb" type="number" min="1" max="256"></div>
-        <div><label>Попыток на файл</label><input id="max_attempts" type="number" min="1"></div>
+        <div><label>Попыток на файл до «ошибки»</label><input id="max_attempts" type="number" min="1"></div>
+        <div><label>Повторять ошибки сами каждые, ч (0 — только вручную)</label><input id="auto_retry_hours" type="number" min="0"></div>
         <div><label>Порт интерфейса</label><input id="port" type="number"></div>
       </div>
+      <div class="chk"><input type="checkbox" id="yandex_adaptive"><span>Подбирать число потоков к Яндексу автоматически: начинать с 4, прибавлять каждые 30 с, пока Яндекс отвечает, и сбавлять, только когда он сам просит притормозить (429, 503). Недоступные файлы потоки не отнимают</span></div>
       <div class="chk"><input type="checkbox" id="include_photounlim"><span>Переносить раздел «Фото» (безлимит)</span></div>
-      <div class="chk"><input type="checkbox" id="skip_existing"><span>Не заливать повторно файл, который уже лежит на Drive (то же имя и MD5)</span></div>
+      <div class="chk"><input type="checkbox" id="include_disk"><span>Переносить раздел «Файлы»</span></div>
+      <div class="chk"><input type="checkbox" id="skip_existing"><span>Не заливать повторно файл, который уже лежит на Drive (то же имя, размер и MD5)</span></div>
       <div class="chk"><input type="checkbox" id="verify_md5"><span>Проверять MD5 после загрузки</span></div>
       <div class="chk"><input type="checkbox" id="autostart"><span>При запуске программы сам продолжать прерванный перенос</span></div>
+      <div class="chk"><input type="checkbox" id="win_autorun"><span>Запускать программу при входе в Windows (после перезагрузки или отключения света перенос продолжится сам — вместе с пунктом выше)</span></div>
+      <div class="chk"><input type="checkbox" id="app_window"><span>Открывать интерфейс отдельным окном (Edge/Chrome без адресной строки)</span></div>
       <button class="primary" onclick="saveSettings()">Сохранить настройки</button>
       <span class="small muted" id="setRes"></span>
-      <div class="small muted" style="margin-top:6px">Число потоков применяется при следующем «Старте».</div>
+      <div class="small muted" style="margin-top:6px">Число потоков и буфер применяются при следующем «Старте».</div>
     </div>
 
     <div class="card">
       <h2>Обслуживание</h2>
       <div class="kv" id="taskBox"></div>
       <div style="display:grid;gap:8px;margin-top:10px">
-        <button onclick="post('/api/actions/retry_errors')">↻ Повторить ошибки и отложенные сейчас</button>
+        <div class="small muted">Файлы, которые Яндекс не отдал, сразу уходят в «Отложенные» и сами не повторяются — чтобы не тормозить остальное.</div>
+        <button onclick="post('/api/actions/retry_errors')">↻ Повторить отложенные и ошибки (ещё один проход)</button>
+        <a href="/api/report.csv?status=deferred"><button style="width:100%">⬇ Список отложенных (CSV для Excel)</button></a>
+        <button onclick="post('/api/actions/previews')">🖼 Сохранить превью для всех фото, которые Яндекс сейчас не отдаёт</button>
         <div class="small muted">Сверка находит удалённые на Drive и несовпавшие файлы и ставит их в очередь:</div>
         <button onclick="post('/api/actions/verify_drive')">🔎 Полная сверка с Google Drive (размер и MD5 каждого файла)</button>
         <a href="/api/report.csv"><button style="width:100%">⬇ Отчёт по всем файлам (CSV для Excel)</button></a>
         <div class="small muted">Полностью начать перенос заново (список файлов сохранится):</div>
-        <button class="danger" onclick="if(confirm('Поставить ВСЕ файлы в очередь заново?'))post('/api/actions/requeue_all')">⟲ Начать перенос заново</button>
+        <button class="danger" onclick="if(confirm('Поставить ВСЕ файлы в очередь заново? Уже лежащие на Drive одинаковые файлы будут пропущены.'))post('/api/actions/requeue_all')">⟲ Начать перенос заново</button>
         <button class="danger" onclick="if(confirm('Удалить всю базу (список файлов и прогресс)? Файлы на Drive не трогаются.'))post('/api/actions/reset_db')">🗑 Очистить базу полностью</button>
+        <button class="danger" onclick="quitApp()">⏻ Выйти из программы (прогресс сохранится)</button>
       </div>
     </div>
   </div>
@@ -219,8 +350,11 @@ a{color:var(--acc)}
     <h2>Файлы</h2>
     <div class="row">
       <select id="fStatus" style="width:auto" onchange="page=0;loadFiles()">
-        <option value="">Все</option><option value="pending">В очереди</option><option value="active">В работе</option>
-        <option value="done">Готово</option><option value="waiting">Ждут Яндекса</option><option value="error">Ошибки</option><option value="skipped">Пропущены</option>
+        <option value="">Все</option><option value="pending">В очереди</option><option value="active">Качаются</option>
+        <option value="buffered">В буфере</option><option value="uploading">Заливаются</option>
+        <option value="done">Готово</option><option value="deferred">Отложены (Яндекс не отдал)</option><option value="waiting">Ждут повтора</option><option value="preview">Есть только превью</option>
+        <option value="error">Ошибки</option><option value="skipped">Пропущены</option>
+        <option value="probe_ok">Разметка: отдаются</option><option value="probe_dead">Разметка: не отдаются</option><option value="probe_none">Разметка: не проверены</option>
       </select>
       <input id="fQuery" placeholder="Поиск по пути" style="flex:1;min-width:160px" oninput="page=0;clearTimeout(window._qt);window._qt=setTimeout(loadFiles,300)">
       <button onclick="page=Math.max(0,page-1);loadFiles()">←</button>
@@ -236,21 +370,43 @@ a{color:var(--acc)}
   <div class="card">
     <h2>Журнал</h2>
     <div class="log" id="log"></div>
-    <div class="small muted" style="margin-top:6px">Полный журнал: файл <code>data/ya2gd.log</code> рядом с программой.</div>
+    <div class="small muted" style="margin-top:6px" id="footer"></div>
+    <div class="small muted" style="margin-top:4px">Бесплатная программа с открытым исходным кодом:
+      <a href="https://github.com/Nikolay3334567/yandex_files_oll_to_google" target="_blank">GitHub</a> ·
+      <a href="/legal/license-ru" target="_blank">лицензия MIT</a> (<a href="/legal/license" target="_blank">англ.</a>) ·
+      <a href="/legal/third-party" target="_blank">сторонние компоненты</a> ·
+      <a href="/legal/readme" target="_blank">README</a>.
+      Предоставляется «как есть», без гарантий; автор не несёт ответственности за последствия её использования.
+      Программа не связана с компаниями «Яндекс» и Google. Ваши данные никуда, кроме Яндекса и Google, не передаются.</div>
   </div>
 </div>
 
 <script>
 const $ = id => document.getElementById(id);
-const ST = {pending:'В очереди', active:'В работе', done:'Готово', error:'Ошибка', skipped:'Пропущен'};
-const STB = {pending:'', active:'b-acc', done:'b-ok', error:'b-err', skipped:'b-warn'};
-let page = 0, logSeq = 0, settings = {};
+const ST = {pending:'В очереди', active:'Качается', buffered:'В буфере', uploading:'Заливается', done:'Готово', error:'Ошибка', skipped:'Пропущен', deferred:'Отложен'};
+const PROBE = {ok:'✓ отдаётся (разметка)', slow:'⚠ отдаёт по капле (разметка)', dead:'✗ не отдаётся (разметка)', missing:'✗ нет на Яндексе (разметка)'};
+const KIND = {photo:'Фото', video:'Видео', doc:'Документы', archive:'Архивы', other:'Прочее'};
+const RES = {ok:['отдаётся','b-ok'], slow:['по капле','b-warn'], dead:['не отдаётся','b-err'], missing:['нет на Яндексе','b-err']};
+const WHY = {ya_speed:'скорость скачивания с Яндекса вместе с вашим интернетом на приём',
+  ya_files:'число файлов: на каждый уходит запрос ссылки и ожидание ответа Яндекса (на недоступные — ещё и ожидание отказа)',
+  google:'загрузка в Google — скорость вашего интернета на отдачу',
+  limit:'суточный лимит Google ≈ 750 ГБ: каждые следующие 750 ГБ добавляют сутки'};
+const STB = {pending:'', active:'b-acc', buffered:'b-warn', uploading:'b-acc', done:'b-ok', error:'b-err', skipped:'b-warn', deferred:'b-warn'};
+let page = 0, logSeq = 0, settings = {}, lastStatus = null;
 
 function fmtB(b){ if(b==null) return '—'; const u=['Б','КБ','МБ','ГБ','ТБ']; let i=0; b=+b;
-  while(b>=1024&&i<u.length-1){b/=1024;i++} return (i?b.toFixed(b<10?2:1):b)+' '+u[i]; }
-function fmtT(s){ if(s==null||!isFinite(s)) return '—'; s=Math.round(s); const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
+  while(b>=1024&&i<u.length-1){b/=1024;i++} return (i?b.toFixed(b<10?2:1):Math.round(b))+' '+u[i]; }
+function fmtT(s){ if(s==null||!isFinite(s)) return '—'; s=Math.round(s); if(s<60) return s+' с'; const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
   return (d?d+' д ':'')+(d||h?h+' ч ':'')+m+' мин'; }
+function hhmm(ts){ return new Date(ts*1000).toLocaleTimeString('ru',{hour:'2-digit',minute:'2-digit'}); }
 function esc(s){ return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function plural(n, one, few, many){ n=Math.abs(n)%100; const n1=n%10;
+  return (n>10&&n<20)?many:(n1>1&&n1<5)?few:(n1===1)?one:many; }
+function nf(n){ return n.toLocaleString('ru')+' '+plural(n,'файл','файла','файлов'); }
+function pct(a,b){ return b ? Math.min(100, a/b*100) : 0; }
+function fmtS(bps){ return bps ? `${fmtB(bps)}/с (${(bps*8/1e6).toFixed(bps*8/1e6<10?1:0)} Мбит/с)` : '—'; }
+function ms(sec){ return sec==null ? '—' : (sec<1 ? Math.round(sec*1000)+' мс' : sec.toFixed(1)+' с'); }
+function kv(rows){ return rows.map(([k,v])=>`<span class="k">${k}</span><span>${v}</span>`).join(''); }
 
 async function api(url, opts={}){
   const r = await fetch(url, opts);
@@ -258,11 +414,11 @@ async function api(url, opts={}){
   if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
   return j;
 }
-async function post(url, body){
+async function post(url, body, quiet){
   try{
     const j = await api(url,{method:'POST',headers:{'Content-Type':'application/json','X-Ya2gd':'1'},body:JSON.stringify(body||{})});
     refresh(); return j;
-  }catch(e){ alert(e.message); throw e; }
+  }catch(e){ if(!quiet) alert(e.message); throw e; }
 }
 
 async function loadSettings(){
@@ -277,6 +433,22 @@ async function loadSettings(){
   $('yaBadge').className = 'badge ' + (settings.yandex_token_set ? 'b-ok' : 'b-warn');
   $('gBadge').textContent = settings.google_refresh_token_set ? ('вход: '+(settings.google_email||'выполнен')) : 'не авторизован';
   $('gBadge').className = 'badge ' + (settings.google_refresh_token_set ? 'b-ok' : 'b-warn');
+  $('bufBadge').textContent = settings.buffer_dir ? 'включён' : 'без буфера';
+  $('bufBadge').className = 'badge ' + (settings.buffer_dir ? 'b-ok' : '');
+  if(settings.yandex_token_set) $('stepYa').classList.add('step-done');
+  $('terms').innerHTML = settings.terms_accepted ? '' : `<div class="card" style="border-color:var(--acc)">
+    <h2>Перед началом</h2>
+    <div class="small">Это бесплатная программа с открытым исходным кодом (<a href="/legal/license-ru" target="_blank">лицензия MIT</a>).
+      Она предоставляется <b>«как есть», без каких-либо гарантий</b>: автор не несёт ответственности за потерю данных,
+      блокировку аккаунтов, расходы и любые другие последствия её использования. Вы сами отвечаете за соблюдение правил
+      Яндекс Диска и Google Drive и за свои данные. Программа не связана с компаниями «Яндекс» и Google и ничего не передаёт
+      автору: токены, куки и прогресс хранятся только на этом компьютере.
+      <b>Не удаляйте ничего на Яндекс Диске, пока перенос не завершён и не сверен.</b>
+      Подробно — в <a href="/legal/readme" target="_blank">README</a>.</div>
+    <div class="row" style="margin-top:10px"><button class="primary" onclick="post('/api/settings',{terms_accepted:true}).then(loadSettings)">Понятно, принимаю</button></div>
+  </div>`;
+  if(settings.google_refresh_token_set) $('stepG').classList.add('step-done');
+  loadDrives();
 }
 function collect(ids){ const o={}; for(const k of ids){ const el=$(k); o[k] = el.type==='checkbox'?el.checked:(el.type==='number'?+el.value:el.value.trim()); } return o; }
 
@@ -286,11 +458,30 @@ async function saveYandex(){
     await post('/api/settings', collect(['yandex_token','yandex_client_id']));
     await loadSettings();
     const r = await api('/api/yandex/test',{method:'POST',headers:{'X-Ya2gd':'1'}});
-    $('yaRes').innerHTML = `✅ Токен рабочий. Пользователь: <b>${esc(r.user)}</b>\nЗанято: ${fmtB(r.used)} из ${fmtB(r.total)}`+
-      (r.photounlim_size?`\nБезлимитные фото: ${fmtB(r.photounlim_size)}`:'')+
-      `\nСписок всех файлов («Файлы»): ${esc(r.files_api)}`+
-      `\nРаздел «Фото» (безлимит): ${r.photounlim_size?fmtB(r.photounlim_size):'пуст'}` +
-      (r.photounlim_size ? (r.photounlim_rest ? ' — отдаётся официальным API' : ' — официальный API не отдаёт, нужен блок 3 (куки)') : '');
+    const over = r.total && r.used > r.total;
+    let unlim;
+    // Дата окончания бесплатного безлимита (API отдаёт её не всем): строка ISO или секунды
+    let endTs = null;
+    if(r.unlim_end!=null && r.unlim_end!==''){
+      const v = typeof r.unlim_end==='number' ? (r.unlim_end<1e12 ? r.unlim_end*1000 : r.unlim_end) : Date.parse(r.unlim_end);
+      if(isFinite(v)) endTs = v;
+    }
+    const freeUntil = endTs && endTs > Date.now() ? new Date(endTs).toLocaleDateString('ru') : null;
+    if(!r.photounlim_size) unlim = 'нет. Значит, фото с телефона лежат в обычных папках (обычно «Фотокамера») — программа возьмёт их через API.';
+    else {
+      unlim = `<b>${fmtB(r.photounlim_size)}</b> — фото и видео с телефона, которые лежат только в разделе «Фото» (не в «Файлах»). `;
+      if(r.is_paid===true) unlim += 'Пока активен тариф Яндекс 360, они не занимают место. ';
+      else if(freeUntil) unlim += `Бесплатный безлимит действует до ${freeUntil}: до этой даты они место не занимают` +
+        (r.will_be_overdrawn ? ', а после — Диск окажется переполнен. ' : '. ');
+      else if(r.is_paid===false) unlim += 'Тарифа Яндекс 360 нет, поэтому они, скорее всего, входят в «занято». ';
+      else unlim += 'Место не занимают только при тарифе Яндекс 360 (или пока действует старый бесплатный безлимит), иначе входят в «занято». ';
+      unlim += r.photounlim_rest ? 'Отдаются официальным API.' : 'Официальный API их не отдаёт — нужен блок 3 (куки).';
+    }
+    $('yaRes').innerHTML = `✅ Токен рабочий. Пользователь: <b>${esc(r.user)}</b>` +
+      `\nМесто на Диске: занято <b>${fmtB(r.used)}</b> из ${fmtB(r.total)}` + (r.trash ? ` (в Корзине ${fmtB(r.trash)})` : '') +
+      (over ? '\n<span style="color:var(--err)">⚠ Диск переполнен. По правилам Яндекса через 44 дня он блокируется, а потом очищается — переносите как можно скорее.</span>' : '') +
+      `\nБезлимит: ${unlim}` +
+      `\n«Файлы» через API: ${esc(r.files_api)}`;
   }catch(e){ $('yaRes').textContent='❌ '+e.message; }
 }
 function yaToken(){
@@ -322,67 +513,253 @@ async function testGoogle(){
 }
 async function saveSettings(){
   try{
-    await post('/api/settings', collect(['drive_root','photounlim_folder','photounlim_split','scan_mode','workers','chunk_mb',
-      'max_attempts','port','include_photounlim','skip_existing','verify_md5','autostart']));
+    await post('/api/settings', collect(['photos_root','photos_split','photos_from_disk','files_root','previews_root','order','scan_mode',
+      'yandex_streams_max','google_streams','chunk_mb','max_attempts','auto_retry_hours','port','yandex_adaptive',
+      'include_photounlim','include_disk','skip_existing','verify_md5','autostart','win_autorun','app_window']));
     $('setRes').textContent='Сохранено'; setTimeout(()=>$('setRes').textContent='',2000); loadSettings();
   }catch(e){}
 }
 
-function tile(key,label,obj,cls){
-  return `<div class="tile" onclick="$('fStatus').value='${key}';page=0;loadFiles()"><div class="small muted">${label}</div>
-  <div class="v ${cls||''}">${(obj?.count||0).toLocaleString('ru')}</div><div class="small muted">${fmtB(obj?.bytes||0)}</div></div>`;
+// ---------------------------------------------------------------- буфер
+async function loadDrives(){
+  const ds = await api('/api/drives').catch(()=>[]);
+  const cur = ($('buffer_dir').value||'').toUpperCase();
+  $('drives').innerHTML = ds.map(d=>{
+    const sel = cur && cur.startsWith(d.root.toUpperCase()) ? ' sel' : '';
+    return `<div class="drive${sel}" onclick="useDrive('${esc(d.root).replace(/\\/g,'\\\\')}')"><b>${esc(d.root)}</b> ${esc(d.label||'')}
+      <span class="muted">свободно ${fmtB(d.free)} из ${fmtB(d.total)}${d.system?' · системный':''}${d.type&&d.type!=='локальный'?' · '+esc(d.type):''}</span></div>`;
+  }).join('');
+}
+function useDrive(root){
+  const sep = root.includes('\\') ? '\\' : '/';
+  $('buffer_dir').value = root.replace(/[\\/]+$/,'') + sep + 'YandexBuffer';
+  checkBuffer(); loadDrives();
+}
+async function pickFolder(){
+  try{
+    $('bufRes').textContent='Открываю окно выбора папки (оно может оказаться за этим окном)…';
+    const r = await post('/api/pick_folder',{initial:$('buffer_dir').value}, true);
+    if(r.path){ $('buffer_dir').value = r.path; checkBuffer(); } else $('bufRes').textContent='';
+  }catch(e){ $('bufRes').textContent='❌ '+e.message; }
+}
+async function checkBuffer(){
+  try{
+    const r = await post('/api/buffer/check',{path:$('buffer_dir').value}, true);
+    $('bufRes').textContent='✅ '+r.msg;
+    if(r.free!=null && +$('buffer_gb').value*2**30 > r.free) $('bufRes').textContent += `\n⚠ Буфер ${$('buffer_gb').value} ГБ больше свободного места — программа всё равно не займёт больше, чем есть, оставив запас.`;
+  }catch(e){ $('bufRes').textContent='❌ '+e.message; }
+}
+async function saveBuffer(){
+  try{
+    if($('buffer_dir').value) await post('/api/buffer/check',{path:$('buffer_dir').value}, true);
+    await post('/api/settings', collect(['buffer_dir','buffer_gb','buffer_min_free_gb']), true);
+    $('bufRes').textContent = '✅ Сохранено' + (lastStatus && lastStatus.transfer.state==='running' ? '. Новые файлы сразу пойдут через буфер.' : '');
+    loadSettings();
+  }catch(e){ $('bufRes').textContent='❌ '+e.message; }
+}
+async function quitApp(){
+  if(!confirm('Остановить перенос и закрыть программу? Прогресс сохранится; при следующем запуске всё продолжится.')) return;
+  await post('/api/quit',{}).catch(()=>{});
+  document.body.innerHTML='<div style="padding:40px;font:16px system-ui">Программа закрывается… Прогресс сохранён. Это окно можно закрыть.</div>';
+}
+
+// ---------------------------------------------------------------- статус
+function tile(key,label,obj,cls,hint){
+  return `<div class="tile" onclick="$('fStatus').value='${key}';page=0;loadFiles();$('fBody').scrollIntoView({behavior:'smooth'})"><div class="small muted">${label}</div>
+  <div class="v ${cls||''}">${(obj?.count||0).toLocaleString('ru')}</div><div class="small muted">${fmtB(obj?.bytes||0)}</div>${hint?`<div class="hint">${hint}</div>`:''}</div>`;
+}
+const PHOTO_SRC = {camera:'безлимит + папка «Фотокамера»', all:'безлимит + все фото и видео с Диска', none:'только безлимит'};
+function section(prefix, src, dst, what){
+  src = src || {count:0,bytes:0,done:0,done_bytes:0};
+  const p = pct(src.done_bytes, src.bytes);
+  $(prefix+'Dst').textContent = 'в папку «'+dst+'»' + (what ? ' · '+what : '');
+  $(prefix+'Pct').textContent = src.count ? p.toFixed(1)+'%' : '—';
+  $(prefix+'Bar').style.width = p.toFixed(2)+'%';
+  $(prefix+'Text').textContent = src.count ? `${src.done.toLocaleString('ru')} из ${nf(src.count)} · ${fmtB(src.done_bytes)} из ${fmtB(src.bytes)}` : 'список ещё не получен';
 }
 
 async function refresh(){
   let s;
   try{ s = await api('/api/status'); $('banner').style.display='none'; }
   catch(e){ $('banner').style.display='block'; return; }
+  lastStatus = s;
   const bs = s.stats.by_status, sum = k=>bs[k]||{count:0,bytes:0};
   const total = Object.values(bs).reduce((a,b)=>({count:a.count+b.count,bytes:a.bytes+b.bytes}),{count:0,bytes:0});
-  const done = sum('done').bytes + sum('skipped').bytes + s.stats.partial_bytes;
-  const pct = total.bytes ? done/total.bytes*100 : 0;
-  $('mainBar').style.width = pct.toFixed(2)+'%';
-  $('mainText').textContent = `${fmtB(done)} из ${fmtB(total.bytes)} (${pct.toFixed(1)}%) · файлов готово ${(sum('done').count+sum('skipped').count).toLocaleString('ru')} из ${total.count.toLocaleString('ru')}`;
-  $('speedText').textContent = s.speed ? `${fmtB(s.speed)}/с · осталось ≈ ${fmtT(s.eta)}` : '';
+  const done = sum('done').bytes + sum('skipped').bytes;
+  const p = pct(done, total.bytes), pp = pct(s.stats.partial_bytes, total.bytes);
+  $('mainBar').style.width = p.toFixed(2)+'%'; $('partBar').style.width = pp.toFixed(2)+'%';
+  $('mainText').textContent = `${fmtB(done)} из ${fmtB(total.bytes)} (${p.toFixed(1)}%) · файлов перенесено ${(sum('done').count+sum('skipped').count).toLocaleString('ru')} из ${total.count.toLocaleString('ru')}`;
+  const sy=s.speed.yandex, sg=s.speed.google;
+  $('speedText').textContent = (sy||sg) ? `Яндекс ↓ ${fmtB(sy)}/с · Google ↑ ${fmtB(sg)}/с · осталось ≈ ${fmtT(s.eta)}` : '';
+
   const t = s.transfer;
-  const map = {idle:['Ожидание',''],running:['Идёт перенос','b-acc'],pausing:['Останавливаюсь…','b-warn'],paused:['На паузе','b-warn'],done:['Завершено','b-ok']};
+  const map = {idle:['Ожидание',''],running:['Идёт перенос','b-acc'],pausing:['Останавливаюсь…','b-warn'],paused:['На паузе','b-warn'],
+    done:['Завершено','b-ok'],attention:['Нужно ваше внимание','b-err']};
   let [txt,cls] = map[t.state]||[t.state,''];
-  if(t.state==='running' && t.cooldown_until) { txt='Ждём лимит Google до '+new Date(t.cooldown_until*1000).toLocaleTimeString('ru'); cls='b-warn'; }
-  if(t.state==='running' && !t.cooldown_until && !s.active.length && s.stats.waiting.count) { txt='Жду, когда Яндекс отдаст отложенные файлы'; cls='b-warn'; }
+  if(t.state==='done' && sum('deferred').count){ txt=`Проход завершён · отложено ${nf(sum('deferred').count)}`; cls='b-warn'; }
+  if(t.state==='running' && t.offline_since){ txt='Нет интернета — жду'; cls='b-err'; }
+  else if(t.state==='running' && !s.active.length && t.next_wakeup){ txt='Жду: Яндекс пока не отдаёт часть файлов, повтор в '+hhmm(t.next_wakeup); cls='b-warn'; }
+  const tk0 = s.task;
+  if(tk0.kind==='probe' && tk0.state==='running' && t.state!=='running'){
+    txt = tk0.name + (tk0.progress&&tk0.progress[1] ? ` · ${pct(tk0.progress[0],tk0.progress[1]).toFixed(0)}%` : '…'); cls='b-acc'; }
+  $('stateBadge').textContent = txt; $('stateBadge').className = 'badge '+cls;
+  $('btnStart').disabled = t.state==='running' || t.state==='pausing';
+  $('btnPause').disabled = t.state!=='running';
+
+  $('attention').innerHTML = s.attention.length ? '<div class="card"><h2>Требует внимания</h2>' +
+    s.attention.map(a=>`<div class="att ${a.level==='err'?'err':''}">${esc(a.msg)}</div>`).join('') + '</div>' : '';
+
+  section('secPhotos', s.stats.by_section.photos, s.folders.photos, PHOTO_SRC[settings.photos_from_disk]);
+  section('secFiles', s.stats.by_section.files, s.folders.files, 'с той же иерархией папок');
+  $('verNum').textContent = s.stats.verified.toLocaleString('ru') + ' из ' + sum('done').count.toLocaleString('ru');
+  $('verText').innerHTML = 'готовых файлов подтверждены: на Google тот же размер и MD5, что на Яндексе' +
+    (s.stats.previews ? `<br>Только превью (оригинал ждём): <b>${s.stats.previews}</b> — папка «${esc(s.folders.previews)}»` : '') +
+    (s.dead_hosts.length ? `<br>Молчащих серверов Яндекса: ${s.dead_hosts.length}` : '');
+
+  const g = s.gate;
+  $('yaBox').innerHTML = kv([
+    ['Скорость', fmtB(sy)+'/с'],
+    ['Потоков', `${g.active} из ${g.limit}` + (g.adaptive ? ` (авто, потолок ${g.max})` : ' (фиксировано)')],
+    ['Почему столько', esc(g.reason)],
+    ['Пауза', t.ya_cooldown ? 'до '+hhmm(t.ya_cooldown)+' (Яндекс просил)' : 'нет'],
+    ['Отложено', sum('deferred').count ? `${nf(sum('deferred').count)} (${fmtB(sum('deferred').bytes)}) — Яндекс не отдал` : 'нет'],
+  ]);
+  const b = s.buffer;
+  if(b.enabled){
+    const used = b.written;
+    $('bufBox').innerHTML = kv([['Папка', esc(b.dir) + (b.in_use ? '' : ' <span style="color:var(--warn)">(включится при «Старте»)</span>')],
+      ['Прошло через буфер', `${nf(b.passed_files)}, ${fmtB(b.passed_bytes)}`], ['Занято сейчас', `${fmtB(used)} из ${fmtB(b.cap)}`],
+      ['Ждут Google', nf(b.files)], ['Свободно на диске', b.free!=null ? fmtB(b.free) : '—']]);
+    $('bufBar').style.width = pct(used, b.cap).toFixed(1)+'%';
+  } else {
+    $('bufBox').innerHTML = kv([['Режим', 'без диска: маленькие файлы — в памяти, большие — напрямую'],
+      ['В памяти', `${nf(b.ram_items)}, ${fmtB(b.ram_bytes)} из ${fmtB(b.ram_limit)}`]]);
+    $('bufBar').style.width = pct(b.ram_bytes, b.ram_limit).toFixed(1)+'%';
+  }
+  const q = s.quota||{};
+  $('gBox').innerHTML = kv([
+    ['Скорость', fmtB(sg)+'/с'],
+    ['Потоков', String(t.uploaders||settings.google_streams||'—')],
+    ['За сутки залито', `${fmtB(s.stats.google_24h)} (лимит Google ≈ 750 ГБ)`],
+    ['Пауза', t.g_cooldown ? 'до '+hhmm(t.g_cooldown)+' (Google просил)' : 'нет'],
+    ['Место на Drive', q.limit ? `свободно ${fmtB(q.limit-q.usage)} из ${fmtB(q.limit)}` : (q.usage!=null?'без ограничения':'нажмите «Проверить» в блоке 2')],
+  ]);
+
+  $('tiles').innerHTML = tile('','Всего',total) + tile('done','Готово',sum('done'),'','на Google, MD5 сверен') +
+    tile('pending','В очереди',{count:sum('pending').count-s.stats.waiting.count,bytes:sum('pending').bytes-s.stats.waiting.bytes}) +
+    tile('active','Качаются',sum('active')) + tile('buffered','В буфере',sum('buffered'),'','ждут загрузки в Google') +
+    tile('uploading','Заливаются',sum('uploading')) +
+    tile('deferred','Отложены',sum('deferred'), sum('deferred').count?'warn':'','Яндекс не отдал — повторить вручную') +
+    tile('error','Ошибки',sum('error'), sum('error').count?'err':'', settings.auto_retry_hours?`повторю сам через ${settings.auto_retry_hours} ч`:'повторить вручную') +
+    tile('skipped','Пропущено',sum('skipped'));
+
+  $('active').innerHTML = s.active.length ? s.active.map(a=>{
+    const pr = a.size? a.done/a.size*100 : 100;
+    return `<div class="active-item"><div class="row small" style="justify-content:space-between"><span><span class="lane ${a.side}">${a.side==='yandex'?'Яндекс ↓':'Google ↑'}</span> <span class="path">${esc(a.path)}</span></span>
+      <span class="muted">${esc(a.stage)} · ${fmtB(a.done)} / ${fmtB(a.size)}</span></div><div class="bar"><div class="${a.side==='yandex'?'ya':''}" style="width:${pr.toFixed(1)}%"></div></div></div>`;
+  }).join('') : '<span class="muted">Ничего</span>';
+
   const pu = s.photounlim;
   $('puBadge').textContent = pu.problem ? 'нужно обновить куки' : (pu.mode==='web' ? 'куки заданы' : (pu.mode==='rest' ? 'через API' : 'не настроен'));
   $('puBadge').className = 'badge ' + (pu.problem ? 'b-err' : (pu.mode ? 'b-ok' : 'b-warn'));
   $('puInfo').innerHTML = pu.problem ? `<span style="color:var(--err)">⚠ ${esc(pu.problem)}</span>` :
-    (pu.size ? `В разделе «Фото»: <b>${fmtB(pu.size)}</b>.` : '');
-  $('stateBadge').textContent = txt + (t.state==='running'?` · потоков ${t.workers}`:'');
-  $('stateBadge').className = 'badge '+cls;
-  $('reason').textContent = t.reason ? '⚠ '+t.reason : '';
-  $('btnStart').disabled = t.state==='running' || t.state==='pausing';
-  $('btnPause').disabled = t.state!=='running';
-
-  $('tiles').innerHTML = tile('','Всего',total) + tile('done','Готово',sum('done'),'') + tile('pending','В очереди',sum('pending'))+
-    tile('active','В работе',sum('active')) + tile('waiting','Ждут Яндекса',s.stats.waiting, s.stats.waiting.count?'b-warn':'') +
-    tile('error','Ошибки',sum('error'), sum('error').count?'b-err':'') + tile('skipped','Пропущено',sum('skipped'));
-  $('verText').textContent = `Проверено по MD5 (на Google тот же размер и MD5, что на Яндексе): ${s.stats.verified.toLocaleString('ru')} из ${sum('done').count.toLocaleString('ru')} готовых`+
-    (s.dead_hosts.length?` · молчащих серверов Яндекса: ${s.dead_hosts.length}`:'');
-
-  $('active').innerHTML = s.active.length ? s.active.map(a=>{
-    const p = a.size? a.done/a.size*100 : 100;
-    return `<div class="active-item"><div class="row small" style="justify-content:space-between"><span class="path">${esc(a.path)}</span>
-      <span class="muted">${esc(a.stage)} · ${fmtB(a.done)} / ${fmtB(a.size)}</span></div><div class="bar"><div style="width:${p.toFixed(1)}%"></div></div></div>`;
-  }).join('') : '<span class="muted">Ничего</span>';
+    (pu.size ? `В разделе «Фото» на Яндексе: <b>${fmtB(pu.size)}</b>.` : '');
 
   const sc = s.scan;
-  const smap = {never:['не выполнялось','b-warn'],running:['идёт','b-acc'],done:['завершено','b-ok'],stopped:['остановлено','b-warn'],interrupted:['прервано','b-err']};
+  const smap = {never:['не выполнялось','b-warn'],running:['идёт','b-acc'],done:['готов','b-ok'],stopped:['остановлено','b-warn'],interrupted:['прервано','b-err']};
   const [stx,scl] = sc.running ? smap.running : (smap[sc.state]||[sc.state,'']);
   $('scanBadge').textContent = stx; $('scanBadge').className='badge '+scl;
-  $('scanText').textContent = `Получено: ${sc.found.toLocaleString('ru')} файлов` +
-    (sc.phase&&sc.phase!=='done'?` · этап: ${({main:'«Файлы»',photounlim:'раздел «Фото»'})[sc.phase]||sc.phase}`:'') + (sc.error?` · ошибка: ${sc.error}`:'');
+  $('scanText').innerHTML = `Получено: <b>${nf(sc.found)}</b>` +
+    (sc.phase&&sc.phase!=='done'?` · этап: ${({main:'«Файлы»',photounlim:'раздел «Фото»'})[sc.phase]||sc.phase}`:'') +
+    (sc.error?` · <span style="color:var(--err)">ошибка: ${esc(sc.error)}</span>`:'');
   $('btnScan').disabled = sc.running;
+  renderProbe(s);
   const tk = s.task;
-  $('taskBox').innerHTML = tk.name ? `<span class="muted">Операция:</span><span>${esc(tk.name)} — ${tk.state==='running'?'выполняется…':(tk.state==='error'?'ошибка':'готово')}</span>
-    <span class="muted">Итог:</span><span>${esc(tk.msg)}</span>` : '';
+  $('taskBox').innerHTML = tk.name ? kv([['Операция', `${esc(tk.name)} — ${tk.state==='running'?'выполняется…':(tk.state==='error'?'ошибка':'готово')}`],
+    ['Итог', esc(tk.msg)]]) : '';
+  $('footer').innerHTML = `Версия ${esc(s.version)} · настройки, прогресс и полный журнал: <code>${esc(s.data_dir)}</code>`;
+  document.title = (t.state==='running' ? p.toFixed(1)+'% · ' : '') + 'Яндекс → Google';
   loadLog();
+}
+
+function renderProbe(s){
+  const pr = s.probe, tk = s.task, est = pr.estimate, m = pr.measure;
+  const probing = tk.kind==='probe' && tk.state==='running';
+  const busy = (tk.state==='running') || s.transfer.state==='running' || s.transfer.state==='pausing';
+  $('btnSample').disabled = busy; $('btnMark').disabled = busy; $('btnRemark').disabled = busy;
+  $('btnTaskStop').style.display = probing ? '' : 'none';
+  $('prBadge').textContent = probing ? 'идёт' : (m ? 'есть замер' : 'не выполнялся');
+  $('prBadge').className = 'badge ' + (probing ? 'b-acc' : (m ? 'b-ok' : ''));
+  if(probing){
+    const p = tk.progress && tk.progress[1] ? pct(tk.progress[0], tk.progress[1]) : 0;
+    $('prRun').innerHTML = `<div class="small"><b>${esc(tk.name)}</b> — ${esc(tk.msg||'начинаю…')}</div>` +
+      `<div class="bar" style="margin-top:4px"><div class="ya" style="width:${p.toFixed(1)}%"></div></div>`;
+  } else if(tk.kind==='probe' && tk.msg){
+    $('prRun').innerHTML = `<div class="small ${tk.state==='error'?'':'muted'}" style="${tk.state==='error'?'color:var(--err)':''}">` +
+      `${esc(tk.name)}: ${tk.state==='stopped'?'остановлено. ':''}${esc(tk.msg)}</div>`;
+  } else $('prRun').innerHTML = '';
+
+  if(!m){
+    $('prEst').innerHTML = '<div class="small muted">Расчёт появится после пробного замера или разметки.</div>';
+  } else {
+    const at = new Date(m.at*1000).toLocaleString('ru',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
+    const pf = est && est.total_s!=null;
+    let html = '<div class="grid3">';
+    html += `<div><h3>Перенос всего оставшегося</h3><div class="big-num">${pf ? '≈ '+fmtT(est.total_s) : '—'}</div>` +
+      `<div class="small muted">${pf ? `«Фото» ≈ ${fmtT(est.photos_s)} · «Файлы» ≈ ${fmtT(est.files_s)} (каждый раздел отдельно)` : 'не хватает данных о скорости — сделайте пробный замер'}</div></div>`;
+    html += `<div><h3>Что ограничивает</h3><div class="small">${est && est.bottleneck ? esc(WHY[est.bottleneck]) : '—'}</div>` +
+      (est && !est.google_measured ? '<div class="small" style="color:var(--warn)">Скорость Google не измерена — в расчёте только Яндекс</div>' : '') + '</div>';
+    html += `<div><h3>Проверка всех файлов (разметка)</h3><div class="big-num">${est ? (est.unlabeled ? '≈ '+fmtT(est.mark_s) : 'готово') : '—'}</div>` +
+      `<div class="small muted">${est && est.unlabeled ? `${nf(est.unlabeled)} ещё не размечено` : 'все неперенесённые файлы размечены'}</div></div>`;
+    html += '</div>';
+    const one = m.all && m.all.speed_bps;
+    const rows = [
+      ['Скачивание с Яндекса', m.ya_bps ? `${fmtS(m.ya_bps)} во все ${m.ya_streams} ${plural(m.ya_streams,'поток','потока','потоков')}` : esc(m.ya_note||'—')],
+      ['Один поток Яндекса', one ? fmtS(one) : '—'],
+      ['Задержка Яндекса на файл', ms(m.all && m.all.overhead_s) + ' (ссылка + первый ответ)'],
+      ['Недоступный файл стоит потоку', ms(m.all && m.all.fail_s)],
+      ['Загрузка в Google', m.g_bps ? `${fmtS(m.g_bps)} во все ${m.g_streams} ${plural(m.g_streams,'поток','потока','потоков')} · задержка ${ms(m.g_rtt_s)}` : esc(m.g_note||'—')],
+    ];
+    if(est){
+      rows.push(['Осталось перенести', `${nf(est.files)}, ${fmtB(est.bytes)}`]);
+      rows.push(['Из них ожидается доступно', `≈ ${nf(est.avail_files)}, ${fmtB(est.avail_bytes)}`]);
+      if(est.lost_files) rows.push(['Ожидается недоступно', `≈ ${nf(est.lost_files)}, ${fmtB(est.lost_bytes)}` + (est.dead_s>60 ? ` · попытки на них ≈ ${fmtT(est.dead_s)}` : '')]);
+    }
+    rows.push(['Замер', `${m.mode==='sample'?'пробный':'по разметке'}, ${at}`]);
+    $('prEst').innerHTML = html + '<div class="kv" style="margin-top:10px">' + kv(rows) + '</div>' +
+      '<div class="small muted" style="margin-top:6px">Это оценка по замеру: реальная скорость Яндекса в аварийном режиме может меняться. Во время переноса точнее строка «осталось ≈» вверху окна.</div>';
+  }
+
+  const L = pr.labels, any = ['photos','files'].some(k=>['ok','slow','dead','missing'].some(x=>L[k][x][0]));
+  if(any){
+    const line = (k, title) => { const x = L[k]; const n = a => a[0];
+      if(!['ok','slow','dead','missing','none'].some(y=>n(x[y]))) return '';
+      return `<div class="small"><b>${title}:</b> отдаются ${n(x.ok).toLocaleString('ru')} (${fmtB(x.ok[1])})` +
+        (n(x.slow)?`, по капле ${n(x.slow)}`:'') +
+        `, <span style="color:${n(x.dead)+n(x.missing)?'var(--err)':'inherit'}">не отдаются ${(n(x.dead)+n(x.missing)).toLocaleString('ru')} (${fmtB(x.dead[1]+x.missing[1])})</span>` +
+        (n(x.none)?`, не проверено ${n(x.none).toLocaleString('ru')}`:'') + '</div>'; };
+    $('prLabels').innerHTML = '<h3>Разметка неперенесённых файлов</h3>' + line('photos','«Фото»') + line('files','«Файлы»') +
+      `<div class="row" style="margin-top:8px">` +
+      (pr.deferrable ? `<button onclick="if(confirm('Отложить ${pr.deferrable} файлов, которые Яндекс при разметке не отдал? Перенос не будет тратить на них время; повторить их можно кнопкой «Повторить отложенные и ошибки».'))post('/api/probe/defer')">⏭ Отложить недоступные по разметке (${pr.deferrable})</button>` : '') +
+      `<a href="/api/report.csv?status=probe_dead"><button>⬇ Не отдаются по разметке (CSV)</button></a></div>` +
+      '<div class="small muted" style="margin-top:4px">Файлы, которые не отдаются, перенос и так берёт последними.</div>';
+  } else $('prLabels').innerHTML = '';
+
+  const kinds = m && m.kinds ? m.kinds : {};
+  const names = Object.keys(KIND).filter(k=>kinds[k] || pr.by_kind[k]);
+  $('prKinds').innerHTML = names.length ? `<table><thead><tr><th>Тип</th><th>Осталось</th><th>В замере: отдаётся</th><th>Задержка</th><th>Скорость потока</th><th>По разметке</th></tr></thead><tbody>` +
+    names.map(k=>{ const a = kinds[k]||{}, b = pr.by_kind[k]||{files:0,bytes:0,ok:0,dead:0};
+      return `<tr><td>${KIND[k]}</td><td>${nf(b.files)}, ${fmtB(b.bytes)}</td><td>${a.n ? `${(a.ok||0)+(a.slow||0)} из ${a.n}` : '—'}</td>` +
+        `<td>${ms(a.overhead_s)}</td><td>${a.speed_bps ? fmtB(a.speed_bps)+'/с' : '—'}</td><td>${b.ok||b.dead ? `отдаются ${b.ok}, нет ${b.dead}` : '—'}</td></tr>`; }).join('') +
+    '</tbody></table>' : '';
+  const sf = pr.sample && pr.sample.files || [];
+  $('prFiles').innerHTML = sf.length ? `<div class="small muted">Пробный замер, ${new Date(pr.sample.at*1000).toLocaleString('ru')}:</div>` +
+    `<table><thead><tr><th>Файл</th><th>Тип</th><th>Размер</th><th>Результат</th><th>Задержка</th><th>Скорость</th><th>Примечание</th></tr></thead><tbody>` +
+    sf.map(f=>{ const [rt, rc] = RES[f.result]||[f.result,''];
+      return `<tr><td class="path">${esc(f.path)}</td><td>${KIND[f.kind]||f.kind}</td><td>${fmtB(f.size)}</td><td><span class="badge ${rc}">${rt}</span></td>` +
+        `<td>${f.link_s!=null ? ms(f.link_s+f.ttfb_s) : (f.fail_s!=null ? 'отказ за '+ms(f.fail_s) : '—')}</td>` +
+        `<td>${f.read_s && f.bytes >= 65536 ? fmtB(f.bytes/f.read_s)+'/с' : '—'}${f.bytes ? `<div class="small muted">прочитано ${fmtB(f.bytes)}</div>` : ''}</td><td class="small">${esc(f.note||'')}</td></tr>`; }).join('') +
+    '</tbody></table>' : '';
 }
 
 async function loadLog(){
@@ -394,7 +771,7 @@ async function loadLog(){
     const d = document.createElement('div'); d.className=it.level;
     d.textContent = new Date(it.ts*1000).toLocaleTimeString('ru')+'  '+it.msg; box.appendChild(d);
   }
-  while(box.childNodes.length>1500) box.removeChild(box.firstChild);
+  while(box.childNodes.length>2000) box.removeChild(box.firstChild);
   if(atEnd) box.scrollTop = box.scrollHeight;
 }
 
@@ -402,19 +779,32 @@ async function loadFiles(){
   const lim=100, st=$('fStatus').value, q=$('fQuery').value.trim();
   const r = await api(`/api/files?status=${st}&q=${encodeURIComponent(q)}&offset=${page*lim}&limit=${lim}`);
   const pages = Math.max(1,Math.ceil(r.total/lim)); if(page>=pages){page=pages-1;}
-  $('fPage').textContent = `стр. ${page+1} из ${pages} · ${r.total.toLocaleString('ru')} файлов`;
-  $('fBody').innerHTML = r.items.map(f=>`<tr><td class="path">${esc(f.path)}</td><td>${fmtB(f.size)}</td>
-    <td><span class="badge ${STB[f.status]}">${ST[f.status]||f.status}</span>${f.verified?'<div class="small" style="color:var(--ok)">✓ MD5 сверен</div>':''}${f.attempts?`<div class="small muted">попыток: ${f.attempts}</div>`:''}
-    ${f.status==='pending'&&f.bytes_done?`<div class="small muted">передано ${fmtB(f.bytes_done)}</div>`:''}</td>
-    <td class="small">${esc(f.note||'')} <span style="color:var(--err)">${esc(f.last_error||'')}</span>
-    ${f.gd_id?`<div><a target="_blank" href="https://drive.google.com/file/d/${esc(f.gd_id)}/view">открыть на Drive</a></div>`:''}</td>
-    <td style="white-space:nowrap">${f.status==='error'||f.status==='skipped'?`<button onclick="fa(${f.id},'retry')">↻</button>`:''}
-    ${f.status==='pending'||f.status==='error'?`<button title="Пропустить" onclick="fa(${f.id},'skip')">⏭</button>`:''}
-    ${f.status==='done'?`<button title="Загрузить заново" onclick="fa(${f.id},'requeue')">⟲</button>`:''}</td></tr>`).join('');
+  $('fPage').textContent = `стр. ${page+1} из ${pages} · ${nf(r.total)}`;
+  const now = Date.now()/1000;
+  $('fBody').innerHTML = r.items.map(f=>{
+    const waiting = f.status==='pending' && f.next_try>now;
+    return `<tr><td class="path">${esc(f.path)}</td><td>${fmtB(f.size)}</td>
+    <td><span class="badge ${waiting?'b-warn':STB[f.status]}">${waiting?'Ждёт повтора':(ST[f.status]||f.status)}</span>${f.verified?'<div class="small" style="color:var(--ok)">✓ MD5 сверен</div>':''}
+    ${f.probe?`<div class="small" title="${esc(f.probe_note||'')}" style="color:${f.probe==='ok'?'var(--ok)':(f.probe==='slow'?'var(--warn)':'var(--err)')}">${PROBE[f.probe]}${f.probe_ms?' · '+f.probe_ms+' мс':''}</div>`:''}
+    ${f.attempts?`<div class="small muted">попыток: ${f.attempts}</div>`:''}${f.defers?`<div class="small muted">откладывался: ${f.defers}</div>`:''}
+    ${(waiting||(f.status==='error'&&settings.auto_retry_hours>0))&&f.next_try<4e9?`<div class="small muted">повтор в ${hhmm(f.next_try)}</div>`:''}
+    ${(f.status==='pending'||f.status==='uploading'||f.status==='buffered')&&f.bytes_done?`<div class="small muted">в Google ${fmtB(f.bytes_done)}</div>`:''}</td>
+    <td class="small">${esc(f.note||'')} <span style="color:var(--err)">${esc(f.status==='done'?'':(f.last_error||''))}</span>
+    ${f.gd_id?`<div><a target="_blank" href="https://drive.google.com/file/d/${esc(f.gd_id)}/view">открыть на Drive</a></div>`:''}
+    ${f.preview_id?`<div><a target="_blank" href="https://drive.google.com/file/d/${esc(f.preview_id)}/view">превью на Drive</a></div>`:''}</td>
+    <td style="white-space:nowrap">${f.status==='error'||f.status==='skipped'||f.status==='deferred'||waiting?`<button title="Повторить сейчас" onclick="fa(${f.id},'retry')">↻</button>`:''}
+    ${f.status==='pending'||f.status==='error'||f.status==='buffered'||f.status==='deferred'?`<button title="Пропустить" onclick="fa(${f.id},'skip')">⏭</button>`:''}
+    ${f.status==='done'?`<button title="Загрузить заново" onclick="fa(${f.id},'requeue')">⟲</button>`:''}</td></tr>`;
+  }).join('');
 }
 async function fa(id,action){ await post('/api/files/action',{id,action}); loadFiles(); }
 
-loadSettings(); refresh(); loadFiles();
+loadSettings().then(()=>{
+  if(settings.yandex_token_set && settings.google_refresh_token_set){ $('stepYa').open=false; $('stepG').open=false; }
+  if(settings.yandex_cookies_set) $('stepPu').open=false;
+  if(settings.buffer_dir) $('stepBuf').open=false;
+});
+refresh(); loadFiles();
 setInterval(refresh, 1500);
 setInterval(()=>{ if(document.visibilityState==='visible') loadFiles(); }, 10000);
 </script>

@@ -69,9 +69,9 @@ class GoogleAuth:
             if self._token and time.time() < self._exp:
                 return self._token
             if not (self.client_id and self.client_secret):
-                raise AuthError("Google: не заданы Client ID / Client secret")
+                raise AuthError("Google: не заданы Client ID / Client secret", service="google")
             if not self.refresh_token:
-                raise AuthError("Google: приложение не авторизовано — нажмите «Войти в Google»")
+                raise AuthError("Google: приложение не авторизовано — нажмите «Войти в Google»", service="google")
             last = None
             for attempt in range(6):
                 try:
@@ -95,10 +95,10 @@ class GoogleAuth:
                         hint = (" Токен отозван или истёк. Если OAuth-приложение в режиме «Testing», "
                                 "Google гасит токены через 7 дней — переведите его в «In production».")
                     raise AuthError(f"Google: обновление токена отклонено ({err}).{hint} "
-                                    f"Нажмите «Войти в Google» ещё раз.")
+                                    f"Нажмите «Войти в Google» ещё раз.", service="google")
                 last = ApiError(f"HTTP {r.status_code}")
                 time.sleep(backoff(attempt, cap=30))
-            raise ApiError(f"Google: не удалось обновить токен: {last}", retryable=True)
+            raise ApiError(f"Google: не удалось обновить токен: {last}", retryable=True, service="google")
 
 
 class DriveClient:
@@ -118,15 +118,18 @@ class DriveClient:
                 r = session().request(method, url, headers=headers,
                                       timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), **kw)
             except NETWORK_ERRORS as e:
-                last = ApiError(f"Сеть (Google): {e}", retryable=True)
+                last = ApiError(f"Сеть (Google): {e}", retryable=True, service="google")
             else:
                 if r.status_code in ok:
                     return r
                 err = classify(r)
+                if isinstance(err, RateLimited):
+                    raise err        # общую паузу Google ставит программа, а не повторы на месте
                 if r.status_code == 401 and attempt == 0:
                     self.auth.invalidate()
                     if tries == 1:
-                        raise ApiError("Google: токен устарел, обновляю", status=401, retryable=True)
+                        raise ApiError("Google: токен устарел, обновляю", status=401, retryable=True,
+                                       service="google")
                     continue
                 if not err.retryable:
                     raise err
@@ -174,22 +177,18 @@ class DriveClient:
                             "appProperties": {APP_PROP: "1"}})
         return r.json()["id"]
 
-    def ensure_folder(self, rel_path, root_name):
-        """Возвращает id папки <root_name>/<rel_path>, создавая недостающие. Кэш — в БД."""
+    def ensure_folder(self, full_path):
+        """id папки по полному пути от «Мой диск» («Фото/2019/2019-05»), недостающие создаются.
+        Кэш — в БД. Находятся только папки, созданные этой программой (доступ drive.file)."""
+        key = "/".join(p for p in full_path.split("/") if p)
+        if not key:
+            return "root"
         with _FOLDER_LOCK:
-            key = rel_path.strip("/")
             cached = self.db.folder_get(key) if self.db else None
             if cached:
                 return cached
-            # корень
-            root = self.db.folder_get("") if self.db else None
-            if not root:
-                found = self.find_in_parent("root", root_name, folders=True)
-                root = found[0]["id"] if found else self.create_folder(root_name, "root")
-                if self.db:
-                    self.db.folder_set("", root)
-            parent, acc = root, ""
-            for part in [p for p in key.split("/") if p]:
+            parent, acc = "root", ""
+            for part in key.split("/"):
                 acc = f"{acc}/{part}" if acc else part
                 fid = self.db.folder_get(acc) if self.db else None
                 if not fid:
@@ -277,13 +276,22 @@ class DriveClient:
         end = start + len(data) - 1
         return self._put(uri, data, f"bytes {start}-{end}/{size}")
 
+    def cancel_upload(self, uri):
+        """Бросить незавершённую сессию загрузки (замер скорости): файл на Drive так и не появляется,
+        а брошенная сессия Google сама истекает через неделю — отмена лишь освобождает её раньше."""
+        try:
+            session().delete(uri, headers={"Authorization": f"Bearer {self.auth.access_token()}"},
+                             timeout=(CONNECT_TIMEOUT, 30)).close()
+        except Exception:  # noqa
+            pass
+
     def _put(self, uri, data, content_range):
         headers = {"Authorization": f"Bearer {self.auth.access_token()}",
                    "Content-Length": str(len(data)), "Content-Range": content_range}
         try:
             r = session().put(uri, data=data, headers=headers, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
         except NETWORK_ERRORS as e:
-            raise ApiError(f"Сеть (Google, загрузка): {e}", retryable=True)
+            raise ApiError(f"Сеть (Google, загрузка): {e}", retryable=True, service="google")
         if r.status_code in (200, 201):
             return "done", r.json()
         if r.status_code == 308:
@@ -293,11 +301,17 @@ class DriveClient:
             return "gone", None
         if r.status_code == 401:
             self.auth.invalidate()
-            raise ApiError("Google: токен устарел, обновляю", status=401, retryable=True)
+            raise ApiError("Google: токен устарел, обновляю", status=401, retryable=True, service="google")
         raise classify(r)
 
 
 def classify(r):
+    e = _classify(r)
+    e.service = "google"
+    return e
+
+
+def _classify(r):
     data = _json(r)
     err = data.get("error") if isinstance(data.get("error"), dict) else {}
     reasons = [e.get("reason") for e in err.get("errors", []) if isinstance(e, dict)]

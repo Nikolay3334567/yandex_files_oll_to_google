@@ -2,13 +2,23 @@
 import html
 import json
 import os
+import shutil
+import sys
+import threading
+import time
 import traceback
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from . import __version__, winsys
 from .http_util import ApiError
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+# Лицензии и README: в exe они вложены в папку legal, в исходниках лежат в корне репозитория
+LEGAL_DIR = os.path.join(sys._MEIPASS, "legal") if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS") \
+    else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LEGAL = {"license": "LICENSE", "license-ru": "LICENSE.ru.txt", "third-party": "THIRD_PARTY_LICENSES.txt",
+         "readme": "README.txt"}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -58,7 +68,12 @@ class Handler(BaseHTTPRequestHandler):
                 with open(os.path.join(STATIC, "index.html"), "rb") as f:
                     return self._send(200, f.read(), "text/html; charset=utf-8")
             if u.path == "/api/status":
-                return self._send(200, e.status())
+                st = e.status()
+                st["version"] = __version__
+                st["data_dir"] = e.dir
+                return self._send(200, st)
+            if u.path == "/api/drives":
+                return self._send(200, winsys.list_drives())
             if u.path == "/api/settings":
                 return self._send(200, e.settings.public())
             if u.path == "/api/log":
@@ -68,8 +83,18 @@ class Handler(BaseHTTPRequestHandler):
                                               int(qs.get("offset", 0)), min(500, int(qs.get("limit", 100))))
                 return self._send(200, {"total": total, "items": rows})
             if u.path == "/api/report.csv":
-                return self._send(200, e.report_csv(), "text/csv; charset=utf-8",
-                                  {"Content-Disposition": 'attachment; filename="ya2gd-report.csv"'})
+                only = qs.get("status") or None
+                name = f"ya2gd-{only}.csv" if only else "ya2gd-report.csv"
+                return self._send(200, e.report_csv(only), "text/csv; charset=utf-8",
+                                  {"Content-Disposition": f'attachment; filename="{name}"'})
+            if u.path.startswith("/legal/") and u.path[7:] in LEGAL:
+                try:
+                    with open(os.path.join(LEGAL_DIR, LEGAL[u.path[7:]]), encoding="utf-8-sig") as f:
+                        return self._send(200, f.read(), "text/plain; charset=utf-8")
+                except OSError:
+                    return self._send(404, "Файл не найден. Тексты лицензий есть в репозитории: "
+                                           "https://github.com/Nikolay3334567/yandex_files_oll_to_google",
+                                      "text/plain; charset=utf-8")
             if u.path == "/oauth/google/start":
                 auth = e.google_auth()
                 if not auth.client_id:
@@ -118,7 +143,22 @@ class Handler(BaseHTTPRequestHandler):
                 if "google_client_id" in clean and clean["google_client_id"] != e.settings["google_client_id"]:
                     clean.setdefault("google_refresh_token", "")
                 e.settings.update(**clean)
+                e.sync_sections()
+                if "buffer_dir" in clean and e.transferring():
+                    e.apply_buffer()            # буфер — сразу, без «Пауза → Старт»
+                if "win_autorun" in clean:
+                    winsys.set_autorun(e.settings["win_autorun"])
                 return self._send(200, e.settings.public())
+            if p == "/api/pick_folder":
+                return self._send(200, {"path": winsys.pick_folder(b.get("initial") or "")})
+            if p == "/api/buffer/check":
+                return self._send(200, _check_buffer(b.get("path") or ""))
+            if p == "/api/actions/previews":
+                e.rescue_previews()
+                return self._send(200, {"ok": True})
+            if p == "/api/quit":
+                threading.Thread(target=_quit, args=(e,), daemon=True).start()
+                return self._send(200, {"ok": True})
             if p == "/api/yandex/test":
                 return self._send(200, e.test_yandex())
             if p == "/api/yandex/web_test":
@@ -149,6 +189,17 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/actions/reset_db":
                 e.reset_db()
                 return self._send(200, {"ok": True})
+            if p == "/api/probe/sample":
+                e.speed_sample()
+                return self._send(200, {"ok": True})
+            if p == "/api/probe/mark":
+                e.mark_all(bool(b.get("fresh")))
+                return self._send(200, {"ok": True})
+            if p == "/api/probe/defer":
+                return self._send(200, {"ok": True, "n": e.defer_marked()})
+            if p == "/api/task/stop":
+                e.stop_task()
+                return self._send(200, {"ok": True})
             if p == "/api/files/action":
                 e.file_action(int(b["id"]), b["action"])
                 return self._send(200, {"ok": True})
@@ -169,8 +220,46 @@ def _page(msg, back=False):
             f'<h3>{html.escape(str(msg))}</h3>{link}</body>')
 
 
+def _check_buffer(path):
+    """Проверка папки буфера: можно ли писать, сколько места."""
+    path = (path or "").strip().strip('"')
+    if not path:
+        return {"ok": True, "msg": "Буфер на диске выключен: маленькие файлы ждут в памяти, большие идут напрямую"}
+    if not os.path.isabs(path):
+        raise ApiError("Укажите полный путь, например D:\\YandexBuffer")
+    try:
+        os.makedirs(path, exist_ok=True)
+        probe = os.path.join(path, ".ya2gd-probe")
+        with open(probe, "wb") as f:
+            f.write(b"x" * 4096)
+        os.remove(probe)
+        du = shutil.disk_usage(path)
+    except OSError as ex:
+        raise ApiError(f"В папку «{path}» нельзя писать: {ex}")
+    return {"ok": True, "free": du.free, "total": du.total,
+            "msg": f"Папка доступна, свободно {du.free / 2**30:.1f} ГБ из {du.total / 2**30:.1f} ГБ"}
+
+
+def _quit(engine):
+    engine.log("Выход по команде из окна программы: останавливаю перенос…")
+    engine.stop_scanning()
+    engine.stop_task()
+    engine.pause_transfer("выход из программы", by_user=False)
+    t0 = time.time()
+    while engine.transferring() and time.time() - t0 < 60:
+        time.sleep(0.5)
+    engine.log("Программа закрыта. Прогресс сохранён — при следующем запуске всё продолжится.")
+    winsys.allow_sleep()
+    time.sleep(0.5)
+    os._exit(0)
+
+
+class _Server(ThreadingHTTPServer):
+    # На Windows SO_REUSEADDR позволяет второй программе занять тот же порт — запрещаем
+    allow_reuse_address = not winsys.WIN
+    daemon_threads = True
+
+
 def serve(engine, port):
     Handler.engine = engine
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    httpd.daemon_threads = True
-    return httpd
+    return _Server(("127.0.0.1", port), Handler)
