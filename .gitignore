@@ -1,0 +1,9 @@
+data/
+__pycache__/
+*.pyc
+.venv/
+build/
+dist/
+legal-build/
+*.spec
+node_modules/
