@@ -385,6 +385,10 @@ class H(BaseHTTPRequestHandler):
                 parts = raw.split(b"--" + bnd)
                 meta = json.loads(parts[1].split(b"\r\n\r\n", 1)[1].rsplit(b"\r\n", 1)[0])
                 data = parts[2].split(b"\r\n\r\n", 1)[1][:-2]
+                fail = [x for x in S.faults.get("fail_once", []) if x in meta["name"]]
+                if fail:                   # временный сбой Google: файл НЕ создан
+                    S.faults["fail_once"] = [x for x in S.faults["fail_once"] if x not in fail]
+                    return self.send_json(503, {"error": {"code": 503, "message": "backend"}})
                 fid = self.new_file(meta, data)
                 S.calls["small_uploads"] += 1
                 once = [x for x in S.faults.get("lose_once", []) if x in meta["name"]]

@@ -1956,16 +1956,23 @@ class Engine:
             name = f"{row['name']} (превью {size}){ext}"
             drive = self.drive(self.stop_transfer)
             parent = drive.ensure_folder(f"{s['previews_root']}/{drive_dir_for(row, s)}")
-            fid = self._preview_on_drive(drive, parent, name)
-            if not fid:
+            for attempt in range(3):
+                fid = self._preview_on_drive(drive, parent, name)
+                if fid:
+                    break
                 try:
                     fid = drive.upload_small(name, parent, body, ctype if ctype.startswith("image/") else "image/jpeg",
                                              {APP_PROP: "preview"})["id"]
-                except (ApiError, *NETWORK_ERRORS):
+                    break
+                except (ApiError, *NETWORK_ERRORS) as e:
                     # ответ Google мог потеряться уже после создания файла — тогда превью уже лежит на Drive
-                    fid = self._preview_on_drive(drive, parent, name)
-                    if not fid:
-                        raise
+                    # (проверка в начале следующего круга); временный сбой Google — ещё попытка через пару секунд
+                    if attempt == 2 or isinstance(e, RateLimited) or (isinstance(e, ApiError) and not e.retryable):
+                        fid = self._preview_on_drive(drive, parent, name)
+                        if not fid:
+                            raise
+                        break
+                    time.sleep(2 * (attempt + 1))
             self.db.update_file(row["id"], preview_id=fid,
                                 note="оригинал пока недоступен — сохранено превью, оригинал продолжаю ждать")
             self.log(f"«{row['name']}»: оригинал не отдаётся — сохранено превью {size} "

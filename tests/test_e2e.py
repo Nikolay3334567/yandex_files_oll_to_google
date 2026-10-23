@@ -266,7 +266,9 @@ def scenario_web(e):
     app, M = e.app, e.M
     app.start()
     dead = "disk:/Фотокамера/IMG_0002.jpg"
-    e.faults(pu_hidden=True, dead=[dead], g_lost=0.3, g_500=0.05, lose_once=["IMG_0002.jpg (превью"])
+    # превью: сначала временный сбой Google (файл не создан), потом «потерянный» ответ (файл создан)
+    e.faults(pu_hidden=True, dead=[dead], g_lost=0.3, g_500=0.05, fail_once=["IMG_0002.jpg (превью"],
+             lose_once=["IMG_0002.jpg (превью"])
     app.post("/api/settings", dict(GOOD, yandex_streams_max=4))
     code, r = app.post("/api/yandex/test")
     assert code == 200 and not r["photounlim_rest"] and r["photounlim_size"] > 0, r
