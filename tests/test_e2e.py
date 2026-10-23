@@ -381,7 +381,8 @@ def scenario_buffer(e):
     app.start()
     app.post("/api/transfer/start")
     wait_for(lambda: app.log_has("Докачка в буфер"), 60, "buffer resume")
-    assert e.stats()["ranges"] > ranges, "докачка без Range-запроса"
+    # запись «Докачка» появляется до самого запроса (сначала — ссылка у Яндекса), поэтому ждём запрос
+    wait_for(lambda: e.stats()["ranges"] > ranges, 30, "докачка с места обрыва (Range-запрос)")
     print("OK после перезапуска файл докачивается в буфер с места обрыва (Range), MD5 сверяется до Google")
 
     def waits_504():
