@@ -3,6 +3,7 @@ import html
 import json
 import os
 import shutil
+import sys
 import threading
 import time
 import traceback
@@ -13,6 +14,11 @@ from . import __version__, winsys
 from .http_util import ApiError
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+# Лицензии и README: в exe они вложены в папку legal, в исходниках лежат в корне репозитория
+LEGAL_DIR = os.path.join(sys._MEIPASS, "legal") if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS") \
+    else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LEGAL = {"license": "LICENSE", "license-ru": "LICENSE.ru.txt", "third-party": "THIRD_PARTY_LICENSES.txt",
+         "readme": "README.txt"}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -81,6 +87,14 @@ class Handler(BaseHTTPRequestHandler):
                 name = f"ya2gd-{only}.csv" if only else "ya2gd-report.csv"
                 return self._send(200, e.report_csv(only), "text/csv; charset=utf-8",
                                   {"Content-Disposition": f'attachment; filename="{name}"'})
+            if u.path.startswith("/legal/") and u.path[7:] in LEGAL:
+                try:
+                    with open(os.path.join(LEGAL_DIR, LEGAL[u.path[7:]]), encoding="utf-8-sig") as f:
+                        return self._send(200, f.read(), "text/plain; charset=utf-8")
+                except OSError:
+                    return self._send(404, "Файл не найден. Тексты лицензий есть в репозитории: "
+                                           "https://github.com/Nikolay3334567/yandex_files_oll_to_google",
+                                      "text/plain; charset=utf-8")
             if u.path == "/oauth/google/start":
                 auth = e.google_auth()
                 if not auth.client_id:

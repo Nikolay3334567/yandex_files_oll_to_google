@@ -33,10 +33,16 @@ jobs:
       - name: Сквозные проверки на имитации Яндекса и Google
         run: python tests/test_e2e.py
 
+      - name: Лицензии сторонних компонентов (из тех версий, что пойдут в exe)
+        run: python tools/third_party_licenses.py legal-build/THIRD_PARTY_LICENSES.txt
+
       - name: Сборка exe
         run: >-
           pyinstaller --noconfirm --onefile --console --name YandexToGoogle
-          --add-data "ya2gd/static;ya2gd/static" --collect-submodules ya2gd --hidden-import tkinter
+          --add-data "ya2gd/static;ya2gd/static"
+          --add-data "LICENSE;legal" --add-data "LICENSE.ru.txt;legal" --add-data "README.txt;legal"
+          --add-data "legal-build/THIRD_PARTY_LICENSES.txt;legal"
+          --collect-submodules ya2gd --hidden-import tkinter
           launcher.py
 
       - name: Проверка, что exe запускается
@@ -49,9 +55,15 @@ jobs:
             Start-Sleep 2
             try { $r = Invoke-RestMethod http://127.0.0.1:8799/api/status; $ok = $true; break } catch {}
           }
+          if ($ok) {
+            # тексты лицензий вложены в exe и открываются из окна программы
+            $lic = Invoke-WebRequest http://127.0.0.1:8799/legal/license -UseBasicParsing
+            $tp = Invoke-WebRequest http://127.0.0.1:8799/legal/third-party -UseBasicParsing
+            if ($lic.Content -notmatch "MIT License" -or $tp.Content -notmatch "requests") { Stop-Process -Id $p.Id -Force; throw "лицензии не вложены в exe" }
+          }
           Stop-Process -Id $p.Id -Force
           if (-not $ok) { throw "exe не ответил" }
-          Write-Host "exe работает, версия $($r.version), данные: $($r.data_dir)"
+          Write-Host "exe работает, версия $($r.version), данные: $($r.data_dir); лицензии вложены"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -63,10 +75,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          (cd dist && sha256sum YandexToGoogle.exe > SHA256SUMS.txt)
+          SUM=$(cut -d' ' -f1 dist/SHA256SUMS.txt)
+          cp legal-build/THIRD_PARTY_LICENSES.txt dist/THIRD_PARTY_LICENSES.txt
           gh release delete latest --yes --cleanup-tag || true
-          gh release create latest dist/YandexToGoogle.exe --target "$GITHUB_SHA" --prerelease \
+          gh release create latest dist/YandexToGoogle.exe dist/SHA256SUMS.txt README.txt LICENSE LICENSE.ru.txt \
+            dist/THIRD_PARTY_LICENSES.txt --target "$GITHUB_SHA" --prerelease \
             --title "YandexToGoogle.exe — последняя сборка" \
-            --notes "Собрано из ветки ${GITHUB_REF_NAME} (${GITHUB_SHA::7}); все проверки пройдены на Windows. Скачайте YandexToGoogle.exe ниже и запустите. Инструкция — в README репозитория."
+            --notes "Собрано из ветки ${GITHUB_REF_NAME} (${GITHUB_SHA::7}); все проверки пройдены на Windows. Скачайте YandexToGoogle.exe ниже и запустите; кратко — README.txt, подробно — README репозитория.
+
+          SHA-256 файла YandexToGoogle.exe: ${SUM} (проверка в Windows: certutil -hashfile YandexToGoogle.exe SHA256).
+
+          Бесплатная программа с открытым исходным кодом, лицензия MIT (LICENSE, LICENSE.ru.txt); сторонние компоненты — THIRD_PARTY_LICENSES.txt. Предоставляется «как есть», без гарантий: автор не несёт ответственности за последствия её использования. Программа не связана с компаниями «Яндекс» и Google."
 
   # Проверка build_exe.bat ровно так, как его запускают у себя: свежий Python (3.14),
   # PyInstaller — последняя подходящая версия.

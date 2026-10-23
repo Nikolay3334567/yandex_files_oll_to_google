@@ -96,6 +96,7 @@ a{color:var(--acc)}
 </header>
 
 <div class="wrap">
+  <div id="terms"></div>
   <div id="attention"></div>
 
   <div class="grid3">
@@ -370,6 +371,13 @@ a{color:var(--acc)}
     <h2>Журнал</h2>
     <div class="log" id="log"></div>
     <div class="small muted" style="margin-top:6px" id="footer"></div>
+    <div class="small muted" style="margin-top:4px">Бесплатная программа с открытым исходным кодом:
+      <a href="https://github.com/Nikolay3334567/yandex_files_oll_to_google" target="_blank">GitHub</a> ·
+      <a href="/legal/license-ru" target="_blank">лицензия MIT</a> (<a href="/legal/license" target="_blank">англ.</a>) ·
+      <a href="/legal/third-party" target="_blank">сторонние компоненты</a> ·
+      <a href="/legal/readme" target="_blank">README</a>.
+      Предоставляется «как есть», без гарантий; автор не несёт ответственности за последствия её использования.
+      Программа не связана с компаниями «Яндекс» и Google. Ваши данные никуда, кроме Яндекса и Google, не передаются.</div>
   </div>
 </div>
 
@@ -428,6 +436,17 @@ async function loadSettings(){
   $('bufBadge').textContent = settings.buffer_dir ? 'включён' : 'без буфера';
   $('bufBadge').className = 'badge ' + (settings.buffer_dir ? 'b-ok' : '');
   if(settings.yandex_token_set) $('stepYa').classList.add('step-done');
+  $('terms').innerHTML = settings.terms_accepted ? '' : `<div class="card" style="border-color:var(--acc)">
+    <h2>Перед началом</h2>
+    <div class="small">Это бесплатная программа с открытым исходным кодом (<a href="/legal/license-ru" target="_blank">лицензия MIT</a>).
+      Она предоставляется <b>«как есть», без каких-либо гарантий</b>: автор не несёт ответственности за потерю данных,
+      блокировку аккаунтов, расходы и любые другие последствия её использования. Вы сами отвечаете за соблюдение правил
+      Яндекс Диска и Google Drive и за свои данные. Программа не связана с компаниями «Яндекс» и Google и ничего не передаёт
+      автору: токены, куки и прогресс хранятся только на этом компьютере.
+      <b>Не удаляйте ничего на Яндекс Диске, пока перенос не завершён и не сверен.</b>
+      Подробно — в <a href="/legal/readme" target="_blank">README</a>.</div>
+    <div class="row" style="margin-top:10px"><button class="primary" onclick="post('/api/settings',{terms_accepted:true}).then(loadSettings)">Понятно, принимаю</button></div>
+  </div>`;
   if(settings.google_refresh_token_set) $('stepG').classList.add('step-done');
   loadDrives();
 }

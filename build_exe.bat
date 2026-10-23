@@ -24,7 +24,9 @@ if not exist ".venv\Scripts\python.exe" (
 echo Ставлю зависимости и PyInstaller ^(последнюю версию, подходящую к вашему Python^)...
 ".venv\Scripts\python.exe" -m pip install -q --disable-pip-version-check --upgrade pip
 ".venv\Scripts\python.exe" -m pip install -q --disable-pip-version-check --upgrade -r requirements.txt "pyinstaller>=6.11" || goto :end
-".venv\Scripts\python.exe" -m PyInstaller --noconfirm --onefile --console --name YandexToGoogle --add-data "ya2gd\static;ya2gd\static" --collect-submodules ya2gd --hidden-import tkinter launcher.py || goto :end
+echo Собираю лицензии сторонних компонентов (кладутся в exe)...
+".venv\Scripts\python.exe" tools\third_party_licenses.py legal-build\THIRD_PARTY_LICENSES.txt || goto :end
+".venv\Scripts\python.exe" -m PyInstaller --noconfirm --onefile --console --name YandexToGoogle --add-data "ya2gd\static;ya2gd\static" --add-data "LICENSE;legal" --add-data "LICENSE.ru.txt;legal" --add-data "README.txt;legal" --add-data "legal-build\THIRD_PARTY_LICENSES.txt;legal" --collect-submodules ya2gd --hidden-import tkinter launcher.py || goto :end
 set ERR=0
 echo.
 echo Готово: dist\YandexToGoogle.exe  ^(рядом с ним появится папка data с настройками и прогрессом^)

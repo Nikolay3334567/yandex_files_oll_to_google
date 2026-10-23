@@ -195,6 +195,16 @@ COOKIES = json.dumps([{"name": "Session_id", "value": "good-session", "domain": 
 def scenario_direct(e):
     app, M = e.app, e.M
     app.start()
+    # условия использования: лицензия, сторонние компоненты, README открываются из окна; «Принимаю» запоминается
+    for path, text in (("/legal/license", "MIT License"), ("/legal/license-ru", "1286.1"),
+                       ("/legal/third-party", "requests"), ("/legal/readme", "ОТКАЗ ОТ ОТВЕТСТВЕННОСТИ")):
+        with urllib.request.urlopen(app.u(path), timeout=10) as r:
+            body = r.read().decode("utf-8")
+            assert text in body and not body.startswith("\ufeff"), path
+    assert app.get("/api/settings")["terms_accepted"] is False
+    app.post("/api/settings", {"terms_accepted": True})
+    assert app.get("/api/settings")["terms_accepted"] is True
+    print("OK лицензия, сторонние компоненты и README открываются из окна; согласие с условиями запоминается")
     app.post("/api/settings", {"yandex_token": "bad"})
     code, r = app.post("/api/yandex/test")
     assert code == 400 and "токен" in r["error"], r

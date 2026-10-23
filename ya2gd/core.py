@@ -43,6 +43,7 @@ DEFAULTS = {
     "win_autorun": False,                 # запускать программу при входе в Windows
     "app_window": True,                   # открывать интерфейс отдельным окном (Edge/Chrome --app)
     "port": 8765,
+    "terms_accepted": False,              # человек прочитал условия (лицензия MIT, без гарантий) и нажал «Принимаю»
     "settings_v": 3,
 }
 
