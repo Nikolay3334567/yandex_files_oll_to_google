@@ -409,8 +409,12 @@ class Prober:
                     self.fatal = ex
                     return
                 except Exception as ex:  # noqa — одна странная ошибка не должна останавливать всю разметку
+                    if self.stop.is_set():
+                        return
                     self.e.log(f"Разметка «{row['path']}»: непредвиденная ошибка {ex!r}", "error")
                     continue
+                if self.stop.is_set():
+                    return          # проверку прервала кнопка «Остановить» — её результат ничего не значит
                 if res is None:
                     with self.lock:
                         q.append(row)

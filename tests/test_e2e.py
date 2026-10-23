@@ -504,9 +504,9 @@ def scenario_probe(e):
           f"расчёт: перенос ≈ {est['total_s']:.0f} с, разметка ≈ {est['mark_s']:.0f} с")
 
     # разметка заново — останавливается кнопкой; перенос в это время не запускается
-    e.faults(slow=0.05)
+    e.faults(slow=0.3)                                   # чтобы «Остановить» пришлась посреди чтения файлов
     app.post("/api/probe/mark", {"fresh": True})
-    time.sleep(0.5)
+    time.sleep(0.8)
     code, r = app.post("/api/transfer/start")
     assert code == 400 and "разметка" in r["error"], r
     app.post("/api/task/stop")
